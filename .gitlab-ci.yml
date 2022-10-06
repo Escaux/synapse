@@ -1,0 +1,15 @@
+---
+variables:
+  DOCKER_BUILD_CONTEXT: docker
+  IMAGE_NAME: synapse
+  DOCKER_BUILDX_BUILD: true
+
+apply-patches:
+  stage: build
+  script:
+    - export QUILT_PATCHES=patches
+    - quilt push -a
+
+include:
+  - project: escaux/ict/gitlab-ci-models
+    file: /buildd-docker.yml
