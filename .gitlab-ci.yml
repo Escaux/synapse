@@ -1,15 +1,24 @@
 ---
-variables:
-  DOCKER_BUILD_CONTEXT: docker
-  IMAGE_NAME: synapse
-  DOCKER_BUILDX_BUILD: "true"
-
 apply-patches:
-  stage: build
+  stage: .pre
   script:
     - export QUILT_PATCHES=patches
     - quilt push -a
 
-include:
-  - project: escaux/ict/gitlab-ci-models
-    file: /buildd-docker.yml
+setup-buildx:
+  stage: .pre
+  script:
+    - DOCKER_BUILDX_BUILDER=builder-$(uuidgen)
+    - echo "DOCKER_BUILDX_BUILDER=$DOCKER_BUILDX_BUILDER" >> build.env
+    - docker buildx create --name $DOCKER_BUILDX_BUILDER --driver docker-container --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' --use
+    - docker buildx inspect --bootstrap --builder $DOCKER_BUILDX_BUILDER
+
+build-container:
+  stage: build
+  script:
+    - docker buildx build --file docker/Dockerfile --platform linux/amd64 --tag dstny/synapse:develop .
+
+cleanup:
+  stage: .post
+  script:
+    - docker buildx rm $DOCKER_BUILDX_BUILDER
