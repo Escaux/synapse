@@ -2,7 +2,7 @@
 variables:
   DOCKER_BUILD_CONTEXT: docker
   IMAGE_NAME: synapse
-  DOCKER_BUILDX_BUILD: true
+  DOCKER_BUILDX_BUILD: "true"
 
 apply-patches:
   stage: build
