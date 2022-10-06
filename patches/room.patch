@@ -1,0 +1,69 @@
+Index: synapse/synapse/storage/databases/main/room.py
+===================================================================
+--- synapse.orig/synapse/storage/databases/main/room.py
++++ synapse/synapse/storage/databases/main/room.py
+@@ -13,6 +13,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import json
+ import logging
+ from abc import abstractmethod
+ from enum import Enum
+@@ -394,24 +395,44 @@ class RoomWorkerStore(CacheInvalidationW
+         if search_filter and search_filter.get(
+             PublicRoomsFilterFields.GENERIC_SEARCH_TERM, None
+         ):
+-            search_term = (
+-                "%" + search_filter[PublicRoomsFilterFields.GENERIC_SEARCH_TERM] + "%"
+-            )
++            search_term = search_filter[PublicRoomsFilterFields.GENERIC_SEARCH_TERM]
++            if search_term.startswith('{"complexFilter"'):
++                complexSearch = json.loads(search_term)
++                where_clauses.append(
++                    """
++                    (
++                        (LOWER(name) LIKE ?
++                        OR LOWER(topic) LIKE ?)
++                        AND
++                        LOWER(canonical_alias) LIKE ?
++                    )
++                    """
++                )
++                query_args += [
++                    "%" + complexSearch['complexFilter']['term'].lower()+ "%",
++                    "%" + complexSearch['complexFilter']['term'].lower()+ "%",
++                    "%" + complexSearch['complexFilter']['tenant'].lower()+ "%",
++                ]
++            else:
++                search_term = (
++                    "%" + search_filter[PublicRoomsFilterFields.GENERIC_SEARCH_TERM] + "%"
++                )
+ 
+-            where_clauses.append(
+-                """
++                where_clauses.append(
++                    """
+                     (
+                         LOWER(name) LIKE ?
+                         OR LOWER(topic) LIKE ?
+                         OR LOWER(canonical_alias) LIKE ?
+                     )
+-                """
+-            )
+-            query_args += [
+-                search_term.lower(),
+-                search_term.lower(),
+-                search_term.lower(),
+-            ]
++                    """
++                )
++
++                query_args += [
++                    search_term.lower(),
++                    search_term.lower(),
++                    search_term.lower(),
++                ]
+ 
+         room_type_clause, args = self._construct_room_type_where_clause(
+             search_filter.get(PublicRoomsFilterFields.ROOM_TYPES, None)
