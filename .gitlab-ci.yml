@@ -14,7 +14,7 @@ setup-buildx:
     - buildd3
     - shell
   script:
-    - DOCKER_BUILDX_BUILDER=builder-$(uuidgen)
+    - DOCKER_BUILDX_BUILDER=builder-$(cat /proc/sys/kernel/random/uuid)
     - echo "DOCKER_BUILDX_BUILDER=$DOCKER_BUILDX_BUILDER" >> build.env
     - docker buildx create --name $DOCKER_BUILDX_BUILDER --driver docker-container --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' --use
     - docker buildx inspect --bootstrap --builder $DOCKER_BUILDX_BUILDER
