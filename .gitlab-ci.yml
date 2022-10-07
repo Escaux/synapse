@@ -1,12 +1,18 @@
 ---
 apply-patches:
   stage: .pre
+  tags:
+    - buildd3
+    - shell
   script:
     - export QUILT_PATCHES=patches
     - quilt push -a
 
 setup-buildx:
   stage: .pre
+  tags:
+    - buildd3
+    - shell
   script:
     - DOCKER_BUILDX_BUILDER=builder-$(uuidgen)
     - echo "DOCKER_BUILDX_BUILDER=$DOCKER_BUILDX_BUILDER" >> build.env
@@ -15,10 +21,16 @@ setup-buildx:
 
 build-container:
   stage: build
+  tags:
+    - buildd3
+    - shell
   script:
     - docker buildx build --file docker/Dockerfile --platform linux/amd64 --tag dstny/synapse:develop .
 
 cleanup:
   stage: .post
+  tags:
+    - buildd3
+    - shell
   script:
     - docker buildx rm $DOCKER_BUILDX_BUILDER
