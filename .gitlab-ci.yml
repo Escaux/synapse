@@ -1,7 +1,7 @@
 ---
 variables:
   DOCKER_REGISTRY: buildd.escaux.com
-  DOCKER_IMAGE_NAME: synapse
+  DOCKER_IMAGE_NAME: connectme-chat-synapse
 
 apply-patches:
   stage: .pre
