@@ -1,4 +1,8 @@
 ---
+variables:
+  DOCKER_REGISTRY: buildd.escaux.com
+  DOCKER_IMAGE_NAME: synapse
+
 apply-patches:
   stage: .pre
   tags:
@@ -8,6 +12,15 @@ apply-patches:
     - export QUILT_PATCHES=patches
     - quilt push -a
 
+compute-image-tag:
+  stage: .pre
+  tags:
+    - buildd3
+    - shell
+  script:
+    - test -n "${CI_COMMIT_REF_NAME}" && export DOCKER_IMAGE_TAG=${CI_COMMIT_REF_NAME}
+    - test -n "${CI_COMMIT_TAG}" && export DOCKER_IMAGE_TAG=${CI_COMMIT_TAG}
+
 setup-buildx:
   stage: .pre
   tags:
@@ -15,9 +28,11 @@ setup-buildx:
     - shell
   script:
     - DOCKER_BUILDX_BUILDER=builder-$(cat /proc/sys/kernel/random/uuid)
-    - echo "DOCKER_BUILDX_BUILDER=$DOCKER_BUILDX_BUILDER" >> build.env
-    - docker buildx create --name $DOCKER_BUILDX_BUILDER --driver docker-container --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' --use
-    - docker buildx inspect --bootstrap --builder $DOCKER_BUILDX_BUILDER
+    - echo "DOCKER_BUILDX_BUILDER=${DOCKER_BUILDX_BUILDER}" >> build.env
+    - docker info
+    - docker buildx version
+    - docker buildx create --name ${DOCKER_BUILDX_BUILDER} --driver docker-container --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' --use
+    - docker buildx inspect --bootstrap --builder ${DOCKER_BUILDX_BUILDER}
 
 build-container:
   stage: build
@@ -25,7 +40,7 @@ build-container:
     - buildd3
     - shell
   script:
-    - docker buildx build --file docker/Dockerfile --platform linux/amd64 --tag buildd.escaux.com/synapse:develop --push .
+    - docker buildx build --file docker/Dockerfile --platform linux/amd64 --tag ${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} --push .
 
 cleanup:
   stage: .post
