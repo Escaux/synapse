@@ -9,23 +9,26 @@
  
  def request_registration(
      user: str,
-@@ -57,9 +59,14 @@
-         _print("ERROR! Received %d %s" % (r.status_code, r.reason))
+@@ -54,7 +56,7 @@
+     r = requests.get(url, verify=False)
+ 
+     if r.status_code != 200:
+-        _print("ERROR! Received %d %s" % (r.status_code, r.reason))
++        _print("ERROR! Received %d %s (%s)" % (r.status_code, r.reason, r.json()))
          if 400 <= r.status_code < 500:
              try:
--                _print(r.json()["error"])
-+                errmsg = r.json()["error"]
+                 _print(r.json()["error"])
+@@ -98,6 +100,9 @@
+                 _print(r.json()["error"])
              except Exception:
                  pass
 +
-+            _print(errmsg)
-+
-+            if errmsg == 'User ID already taken.':
++            if r.json()['errcode'] == 'M_USER_IN_USE':
 +                raise UserExistsError()
          return exit(1)
  
-     nonce = r.json()["nonce"]
-@@ -213,6 +220,12 @@
+     _print("Success!")
+@@ -213,6 +218,12 @@
      )
  
      parser.add_argument(
@@ -38,7 +41,7 @@
          "server_url",
          nargs="?",
          help="URL to use to talk to the homeserver. By default, tries to find a "
-@@ -264,9 +277,16 @@
+@@ -264,9 +275,16 @@
      if args.admin or args.no_admin:
          admin = args.admin
  
