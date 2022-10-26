@@ -1,0 +1,60 @@
+--- a/synapse/_scripts/register_new_matrix_user.py
++++ b/synapse/_scripts/register_new_matrix_user.py
+@@ -36,6 +36,8 @@
+ 
+ _DEFAULT_SERVER_URL = "http://localhost:8008"
+ 
++class UserExistsError(RuntimeError):
++    pass
+ 
+ def request_registration(
+     user: str,
+@@ -57,9 +59,14 @@
+         _print("ERROR! Received %d %s" % (r.status_code, r.reason))
+         if 400 <= r.status_code < 500:
+             try:
+-                _print(r.json()["error"])
++                errmsg = r.json()["error"]
+             except Exception:
+                 pass
++
++            _print(errmsg)
++
++            if errmsg == 'User ID already taken.':
++                raise UserExistsError()
+         return exit(1)
+ 
+     nonce = r.json()["nonce"]
+@@ -213,6 +220,12 @@
+     )
+ 
+     parser.add_argument(
++        "--idempotent",
++        action="store_true",
++        help="Command will not fail if user already exists.",
++    )
++
++    parser.add_argument(
+         "server_url",
+         nargs="?",
+         help="URL to use to talk to the homeserver. By default, tries to find a "
+@@ -264,9 +277,16 @@
+     if args.admin or args.no_admin:
+         admin = args.admin
+ 
+-    register_new_user(
+-        args.user, args.password, server_url, secret, admin, args.user_type
+-    )
++    try:
++        register_new_user(
++            args.user, args.password, server_url, secret, admin, args.user_type
++        )
++    except UserExistsError:
++        if args.idempotent:
++            print('Ignoring the fact that the user already exists.')
++            pass
++        else:
++            sys.exit(1)
+ 
+ 
+ def _read_file(file_path: Any, config_path: str) -> str:
