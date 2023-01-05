@@ -9,7 +9,7 @@ compute-image-tag:
     - buildd3
     - shell
   script:
-    - test -n "${CI_COMMIT_REF_NAME}" && export DOCKER_IMAGE_TAG="${CI_COMMIT_REF_NAME}"
+    - test -n "${CI_COMMIT_REF_SLUG}" && export DOCKER_IMAGE_TAG="${CI_COMMIT_REF_SLUG}"
     - test -n "${CI_COMMIT_TAG}" && export DOCKER_IMAGE_TAG="${CI_COMMIT_TAG}" || true
     - echo "DOCKER_IMAGE_TAG=${DOCKER_IMAGE_TAG}" >> build.env
   artifacts:

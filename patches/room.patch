@@ -1,7 +1,5 @@
-Index: synapse/synapse/storage/databases/main/room.py
-===================================================================
---- synapse.orig/synapse/storage/databases/main/room.py
-+++ synapse/synapse/storage/databases/main/room.py
+--- a/synapse/storage/databases/main/room.py
++++ b/synapse/storage/databases/main/room.py
 @@ -13,6 +13,7 @@
  # See the License for the specific language governing permissions and
  # limitations under the License.
@@ -10,60 +8,50 @@ Index: synapse/synapse/storage/databases/main/room.py
  import logging
  from abc import abstractmethod
  from enum import Enum
-@@ -394,24 +395,44 @@ class RoomWorkerStore(CacheInvalidationW
-         if search_filter and search_filter.get(
-             PublicRoomsFilterFields.GENERIC_SEARCH_TERM, None
-         ):
--            search_term = (
--                "%" + search_filter[PublicRoomsFilterFields.GENERIC_SEARCH_TERM] + "%"
--            )
-+            search_term = search_filter[PublicRoomsFilterFields.GENERIC_SEARCH_TERM]
-+            if search_term.startswith('{"complexFilter"'):
-+                complexSearch = json.loads(search_term)
-+                where_clauses.append(
-+                    """
-+                    (
-+                        (LOWER(name) LIKE ?
-+                        OR LOWER(topic) LIKE ?)
-+                        AND
-+                        LOWER(canonical_alias) LIKE ?
+@@ -413,6 +414,26 @@
+                 search_term.lower(),
+             ]
+ 
++        complex_where_clauses = []
++        complex_where_clauses_type: str = None
++        if search_filter and search_filter.get(
++            PublicRoomsFilterFields.COMPLEX_SEARCH_TERMS, None
++        ):
++            complex_where_clauses_type = search_filter[PublicRoomsFilterFields.COMPLEX_SEARCH_TERMS]['type']
++            for search_term in search_filter[PublicRoomsFilterFields.COMPLEX_SEARCH_TERMS]['terms']:
++                # only allow searching for these specific fields
++                for field in set(search_term.keys()) & {'canonical_alias', 'name', 'topic'}:
++                    complex_where_clauses.append(
++                        f"""
++                        (
++                            LOWER({field}) LIKE ?
++                        )
++                        """
 +                    )
-+                    """
-+                )
-+                query_args += [
-+                    "%" + complexSearch['complexFilter']['term'].lower()+ "%",
-+                    "%" + complexSearch['complexFilter']['term'].lower()+ "%",
-+                    "%" + complexSearch['complexFilter']['tenant'].lower()+ "%",
-+                ]
-+            else:
-+                search_term = (
-+                    "%" + search_filter[PublicRoomsFilterFields.GENERIC_SEARCH_TERM] + "%"
-+                )
- 
--            where_clauses.append(
--                """
-+                where_clauses.append(
-+                    """
-                     (
-                         LOWER(name) LIKE ?
-                         OR LOWER(topic) LIKE ?
-                         OR LOWER(canonical_alias) LIKE ?
-                     )
--                """
--            )
--            query_args += [
--                search_term.lower(),
--                search_term.lower(),
--                search_term.lower(),
--            ]
-+                    """
-+                )
++                    query_args += [
++                        search_term[field].lower(),
++                    ]
 +
-+                query_args += [
-+                    search_term.lower(),
-+                    search_term.lower(),
-+                    search_term.lower(),
-+                ]
- 
          room_type_clause, args = self._construct_room_type_where_clause(
              search_filter.get(PublicRoomsFilterFields.ROOM_TYPES, None)
+             if search_filter
+@@ -426,6 +447,9 @@
+         if where_clauses:
+             where_clause = " AND " + " AND ".join(where_clauses)
+ 
++        if complex_where_clauses:
++            where_clause += " AND ( " + f" {complex_where_clauses_type} ".join(complex_where_clauses) + " )"
++
+         dir = "DESC" if forwards else "ASC"
+         sql = f"""
+             SELECT
+--- a/synapse/api/constants.py
++++ b/synapse/api/constants.py
+@@ -271,6 +271,7 @@
+     """
+ 
+     GENERIC_SEARCH_TERM: Final = "generic_search_term"
++    COMPLEX_SEARCH_TERMS: Final = "complex_search_terms"
+     ROOM_TYPES: Final = "room_types"
+ 
+ 
