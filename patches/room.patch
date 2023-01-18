@@ -8,7 +8,7 @@
  import logging
  from abc import abstractmethod
  from enum import Enum
-@@ -413,6 +414,26 @@
+@@ -419,6 +420,26 @@
                  search_term.lower(),
              ]
  
@@ -35,7 +35,7 @@
          room_type_clause, args = self._construct_room_type_where_clause(
              search_filter.get(PublicRoomsFilterFields.ROOM_TYPES, None)
              if search_filter
-@@ -426,6 +447,9 @@
+@@ -432,6 +453,9 @@
          if where_clauses:
              where_clause = " AND " + " AND ".join(where_clauses)
  
