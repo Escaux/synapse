@@ -1,7 +1,7 @@
 ---
 variables:
   DOCKER_REGISTRY: registry.gitlab.com/telepo/smg/artifactory
-  DOCKER_IMAGE_NAME: connectme-chat-synapse
+  DOCKER_IMAGE_NAME: scp-synapse
 
 stages:
   - .pre
