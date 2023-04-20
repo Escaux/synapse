@@ -16,11 +16,11 @@ import logging
 import threading
 import weakref
 from enum import Enum, auto
+from itertools import chain
 from typing import (
     TYPE_CHECKING,
     Any,
     Collection,
-    Container,
     Dict,
     Iterable,
     List,
@@ -59,9 +59,9 @@ from synapse.metrics.background_process_metrics import (
     run_as_background_process,
     wrap_as_background_process,
 )
-from synapse.replication.slave.storage._slaved_id_tracker import SlavedIdTracker
-from synapse.replication.tcp.streams import BackfillStream
+from synapse.replication.tcp.streams import BackfillStream, UnPartialStatedEventStream
 from synapse.replication.tcp.streams.events import EventsStream
+from synapse.replication.tcp.streams.partial_state import UnPartialStatedEventStreamRow
 from synapse.storage._base import SQLBaseStore, db_to_json, make_in_list_sql_clause
 from synapse.storage.database import (
     DatabasePool,
@@ -71,16 +71,19 @@ from synapse.storage.database import (
 from synapse.storage.engines import PostgresEngine
 from synapse.storage.types import Cursor
 from synapse.storage.util.id_generators import (
+    AbstractStreamIdGenerator,
     AbstractStreamIdTracker,
     MultiWriterIdGenerator,
     StreamIdGenerator,
 )
 from synapse.storage.util.sequence import build_sequence_generator
 from synapse.types import JsonDict, get_domain_from_id
+from synapse.types.state import StateFilter
 from synapse.util import unwrapFirstError
 from synapse.util.async_helpers import ObservableDeferred, delay_cancellation
 from synapse.util.caches.descriptors import cached, cachedList
 from synapse.util.caches.lrucache import AsyncLruCache
+from synapse.util.caches.stream_change_cache import StreamChangeCache
 from synapse.util.cancellation import cancellable
 from synapse.util.iterutils import batch_iter
 from synapse.util.metrics import Measure
@@ -212,26 +215,35 @@ class EventsWorkerStore(SQLBaseStore):
             # `StreamIdGenerator`, otherwise we use `SlavedIdTracker` which gets
             # updated over replication. (Multiple writers are not supported for
             # SQLite).
-            if hs.get_instance_name() in hs.config.worker.writers.events:
-                self._stream_id_gen = StreamIdGenerator(
-                    db_conn,
-                    "events",
-                    "stream_ordering",
-                )
-                self._backfill_id_gen = StreamIdGenerator(
-                    db_conn,
-                    "events",
-                    "stream_ordering",
-                    step=-1,
-                    extra_tables=[("ex_outlier_stream", "event_stream_ordering")],
-                )
-            else:
-                self._stream_id_gen = SlavedIdTracker(
-                    db_conn, "events", "stream_ordering"
-                )
-                self._backfill_id_gen = SlavedIdTracker(
-                    db_conn, "events", "stream_ordering", step=-1
-                )
+            self._stream_id_gen = StreamIdGenerator(
+                db_conn,
+                "events",
+                "stream_ordering",
+                is_writer=hs.get_instance_name() in hs.config.worker.writers.events,
+            )
+            self._backfill_id_gen = StreamIdGenerator(
+                db_conn,
+                "events",
+                "stream_ordering",
+                step=-1,
+                extra_tables=[("ex_outlier_stream", "event_stream_ordering")],
+                is_writer=hs.get_instance_name() in hs.config.worker.writers.events,
+            )
+
+        events_max = self._stream_id_gen.get_current_token()
+        curr_state_delta_prefill, min_curr_state_delta_id = self.db_pool.get_cache_dict(
+            db_conn,
+            "current_state_delta_stream",
+            entity_column="room_id",
+            stream_column="stream_id",
+            max_value=events_max,  # As we share the stream id with events token
+            limit=1000,
+        )
+        self._curr_state_delta_stream_cache: StreamChangeCache = StreamChangeCache(
+            "_curr_state_delta_stream_cache",
+            min_curr_state_delta_id,
+            prefilled_cache=curr_state_delta_prefill,
+        )
 
         if hs.config.worker.run_background_tasks:
             # We periodically clean out old transaction ID mappings
@@ -282,6 +294,93 @@ class EventsWorkerStore(SQLBaseStore):
             id_column="chain_id",
         )
 
+        self._un_partial_stated_events_stream_id_gen: AbstractStreamIdGenerator
+
+        if isinstance(database.engine, PostgresEngine):
+            self._un_partial_stated_events_stream_id_gen = MultiWriterIdGenerator(
+                db_conn=db_conn,
+                db=database,
+                stream_name="un_partial_stated_event_stream",
+                instance_name=hs.get_instance_name(),
+                tables=[
+                    ("un_partial_stated_event_stream", "instance_name", "stream_id")
+                ],
+                sequence_name="un_partial_stated_event_stream_sequence",
+                # TODO(faster_joins, multiple writers) Support multiple writers.
+                writers=["master"],
+            )
+        else:
+            self._un_partial_stated_events_stream_id_gen = StreamIdGenerator(
+                db_conn, "un_partial_stated_event_stream", "stream_id"
+            )
+
+    def get_un_partial_stated_events_token(self) -> int:
+        # TODO(faster_joins, multiple writers): This is inappropriate if there are multiple
+        #     writers because workers that don't write often will hold all
+        #     readers up.
+        return self._un_partial_stated_events_stream_id_gen.get_current_token()
+
+    async def get_un_partial_stated_events_from_stream(
+        self, instance_name: str, last_id: int, current_id: int, limit: int
+    ) -> Tuple[List[Tuple[int, Tuple[str, bool]]], int, bool]:
+        """Get updates for the un-partial-stated events replication stream.
+
+        Args:
+            instance_name: The writer we want to fetch updates from. Unused
+                here since there is only ever one writer.
+            last_id: The token to fetch updates from. Exclusive.
+            current_id: The token to fetch updates up to. Inclusive.
+            limit: The requested limit for the number of rows to return. The
+                function may return more or fewer rows.
+
+        Returns:
+            A tuple consisting of: the updates, a token to use to fetch
+            subsequent updates, and whether we returned fewer rows than exists
+            between the requested tokens due to the limit.
+
+            The token returned can be used in a subsequent call to this
+            function to get further updatees.
+
+            The updates are a list of 2-tuples of stream ID and the row data
+        """
+
+        if last_id == current_id:
+            return [], current_id, False
+
+        def get_un_partial_stated_events_from_stream_txn(
+            txn: LoggingTransaction,
+        ) -> Tuple[List[Tuple[int, Tuple[str, bool]]], int, bool]:
+            sql = """
+                SELECT stream_id, event_id, rejection_status_changed
+                FROM un_partial_stated_event_stream
+                WHERE ? < stream_id AND stream_id <= ? AND instance_name = ?
+                ORDER BY stream_id ASC
+                LIMIT ?
+            """
+            txn.execute(sql, (last_id, current_id, instance_name, limit))
+            updates = [
+                (
+                    row[0],
+                    (
+                        row[1],
+                        bool(row[2]),
+                    ),
+                )
+                for row in txn
+            ]
+            limited = False
+            upto_token = current_id
+            if len(updates) >= limit:
+                upto_token = updates[-1][0]
+                limited = True
+
+            return updates, upto_token, limited
+
+        return await self.db_pool.runInteraction(
+            "get_un_partial_stated_events_from_stream",
+            get_un_partial_stated_events_from_stream_txn,
+        )
+
     def process_replication_rows(
         self,
         stream_name: str,
@@ -289,12 +388,27 @@ class EventsWorkerStore(SQLBaseStore):
         token: int,
         rows: Iterable[Any],
     ) -> None:
+        if stream_name == UnPartialStatedEventStream.NAME:
+            for row in rows:
+                assert isinstance(row, UnPartialStatedEventStreamRow)
+
+                self.is_partial_state_event.invalidate((row.event_id,))
+
+                if row.rejection_status_changed:
+                    # If the partial-stated event became rejected or unrejected
+                    # when it wasn't before, we need to invalidate this cache.
+                    self._invalidate_local_get_event_cache(row.event_id)
+
+        super().process_replication_rows(stream_name, instance_name, token, rows)
+
+    def process_replication_position(
+        self, stream_name: str, instance_name: str, token: int
+    ) -> None:
         if stream_name == EventsStream.NAME:
             self._stream_id_gen.advance(instance_name, token)
         elif stream_name == BackfillStream.NAME:
             self._backfill_id_gen.advance(instance_name, -token)
-
-        super().process_replication_rows(stream_name, instance_name, token, rows)
+        super().process_replication_position(stream_name, instance_name, token)
 
     async def have_censored_event(self, event_id: str) -> bool:
         """Check if an event has been censored, i.e. if the content of the event has been erased
@@ -870,7 +984,7 @@ class EventsWorkerStore(SQLBaseStore):
     async def get_stripped_room_state_from_event_context(
         self,
         context: EventContext,
-        state_types_to_include: Container[str],
+        state_keys_to_include: StateFilter,
         membership_user_id: Optional[str] = None,
     ) -> List[JsonDict]:
         """
@@ -883,7 +997,7 @@ class EventsWorkerStore(SQLBaseStore):
 
         Args:
             context: The event context to retrieve state of the room from.
-            state_types_to_include: The type of state events to include.
+            state_keys_to_include: The state events to include, for each event type.
             membership_user_id: An optional user ID to include the stripped membership state
                 events of. This is useful when generating the stripped state of a room for
                 invites. We want to send membership events of the inviter, so that the
@@ -892,21 +1006,25 @@ class EventsWorkerStore(SQLBaseStore):
         Returns:
             A list of dictionaries, each representing a stripped state event from the room.
         """
-        current_state_ids = await context.get_current_state_ids()
+        if membership_user_id:
+            types = chain(
+                state_keys_to_include.to_types(),
+                [(EventTypes.Member, membership_user_id)],
+            )
+            filter = StateFilter.from_types(types)
+        else:
+            filter = state_keys_to_include
+        selected_state_ids = await context.get_current_state_ids(filter)
 
         # We know this event is not an outlier, so this must be
         # non-None.
-        assert current_state_ids is not None
+        assert selected_state_ids is not None
 
-        # The state to include
-        state_to_include_ids = [
-            e_id
-            for k, e_id in current_state_ids.items()
-            if k[0] in state_types_to_include
-            or (membership_user_id and k == (EventTypes.Member, membership_user_id))
-        ]
+        # Confusingly, get_current_state_events may return events that are discarded by
+        # the filter, if they're in context._state_delta_due_to_event. Strip these away.
+        selected_state_ids = filter.filter_state(selected_state_ids)
 
-        state_to_include = await self.get_events(state_to_include_ids)
+        state_to_include = await self.get_events(selected_state_ids.values())
 
         return [
             {
@@ -1573,7 +1691,7 @@ class EventsWorkerStore(SQLBaseStore):
             room_id: The room ID to query.
 
         Returns:
-            dict[str:float] of complexity version to complexity.
+            Map of complexity version to complexity.
         """
         state_events = await self.get_current_state_event_counts(room_id)
 
@@ -2219,7 +2337,15 @@ class EventsWorkerStore(SQLBaseStore):
         return result is not None
 
     async def get_partial_state_events_batch(self, room_id: str) -> List[str]:
-        """Get a list of events in the given room that have partial state"""
+        """
+        Get a list of events in the given room that:
+        - have partial state; and
+        - are ready to be resynced (because they have no prev_events that are
+          partial-stated)
+
+        See the docstring on `_get_partial_state_events_batch_txn` for more
+        information.
+        """
         return await self.db_pool.runInteraction(
             "get_partial_state_events_batch",
             self._get_partial_state_events_batch_txn,
@@ -2270,6 +2396,9 @@ class EventsWorkerStore(SQLBaseStore):
 
         This can happen, for example, when resyncing state during a faster join.
 
+        It is the caller's responsibility to ensure that other workers are
+        sent a notification so that they call `_invalidate_local_get_event_cache()`.
+
         Args:
             txn:
             event_id: ID of event to update
@@ -2308,14 +2437,3 @@ class EventsWorkerStore(SQLBaseStore):
         )
 
         self.invalidate_get_event_cache_after_txn(txn, event_id)
-
-        # TODO(faster_joins): invalidate the cache on workers. Ideally we'd just
-        #   call '_send_invalidation_to_replication', but we actually need the other
-        #   end to call _invalidate_local_get_event_cache() rather than (just)
-        #   _get_event_cache.invalidate().
-        #
-        #   One solution might be to (somehow) get the workers to call
-        #   _invalidate_caches_for_event() (though that will invalidate more than
-        #   strictly necessary).
-        #
-        #   https://github.com/matrix-org/synapse/issues/12994

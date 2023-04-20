@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from synapse.server import HomeServer
 
 FILTER_SCHEMA = {
-    "additionalProperties": False,
+    "additionalProperties": True,  # Allow new fields for forward compatibility
     "type": "object",
     "properties": {
         "limit": {"type": "number"},
@@ -63,7 +63,7 @@ FILTER_SCHEMA = {
 }
 
 ROOM_FILTER_SCHEMA = {
-    "additionalProperties": False,
+    "additionalProperties": True,  # Allow new fields for forward compatibility
     "type": "object",
     "properties": {
         "not_rooms": {"$ref": "#/definitions/room_id_array"},
@@ -77,7 +77,7 @@ ROOM_FILTER_SCHEMA = {
 }
 
 ROOM_EVENT_FILTER_SCHEMA = {
-    "additionalProperties": False,
+    "additionalProperties": True,  # Allow new fields for forward compatibility
     "type": "object",
     "properties": {
         "limit": {"type": "number"},
@@ -143,7 +143,7 @@ USER_FILTER_SCHEMA = {
             },
         },
     },
-    "additionalProperties": False,
+    "additionalProperties": True,  # Allow new fields for forward compatibility
 }
 
 
@@ -351,13 +351,13 @@ class Filter:
             self.not_rel_types = filter_json.get("org.matrix.msc3874.not_rel_types", [])
 
     def filters_all_types(self) -> bool:
-        return "*" in self.not_types
+        return self.types == [] or "*" in self.not_types
 
     def filters_all_senders(self) -> bool:
-        return "*" in self.not_senders
+        return self.senders == [] or "*" in self.not_senders
 
     def filters_all_rooms(self) -> bool:
-        return "*" in self.not_rooms
+        return self.rooms == [] or "*" in self.not_rooms
 
     def _check(self, event: FilterEvent) -> bool:
         """Checks whether the filter matches the given event.
@@ -450,8 +450,8 @@ class Filter:
             if any(map(match_func, disallowed_values)):
                 return False
 
-            # Other the event does not match at least one of the allowed values,
-            # reject it.
+            # Otherwise if the event does not match at least one of the allowed
+            # values, reject it.
             allowed_values = getattr(self, name)
             if allowed_values is not None:
                 if not any(map(match_func, allowed_values)):

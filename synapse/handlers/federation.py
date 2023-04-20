@@ -70,8 +70,8 @@ from synapse.replication.http.federation import (
 )
 from synapse.storage.databases.main.events import PartialStateConflictError
 from synapse.storage.databases.main.events_worker import EventRedactBehaviour
-from synapse.storage.state import StateFilter
 from synapse.types import JsonDict, get_domain_from_id
+from synapse.types.state import StateFilter
 from synapse.util.async_helpers import Linearizer
 from synapse.util.retryutils import NotRetryingDestination
 from synapse.visibility import filter_events_for_server
@@ -152,6 +152,7 @@ class FederationHandler:
         self._federation_event_handler = hs.get_federation_event_handler()
         self._device_handler = hs.get_device_handler()
         self._bulk_push_rule_evaluator = hs.get_bulk_push_rule_evaluator()
+        self._notifier = hs.get_notifier()
 
         self._clean_room_for_join_client = ReplicationCleanRoomRestServlet.make_client(
             hs
@@ -379,6 +380,7 @@ class FederationHandler:
             filtered_extremities = await filter_events_for_server(
                 self._storage_controllers,
                 self.server_name,
+                self.server_name,
                 events_to_check,
                 redact=False,
                 check_history_visibility_only=True,
@@ -442,6 +444,15 @@ class FederationHandler:
                     # appropriate stuff.
                     # TODO: We can probably do something more intelligent here.
                     return True
+                except NotRetryingDestination as e:
+                    logger.info("_maybe_backfill_inner: %s", e)
+                    continue
+                except FederationDeniedError:
+                    logger.info(
+                        "_maybe_backfill_inner: Not attempting to backfill from %s because the homeserver is not on our federation whitelist",
+                        dom,
+                    )
+                    continue
                 except (SynapseError, InvalidResponseError) as e:
                     logger.info("Failed to backfill from %s because %s", dom, e)
                     continue
@@ -477,14 +488,8 @@ class FederationHandler:
 
                     logger.info("Failed to backfill from %s because %s", dom, e)
                     continue
-                except NotRetryingDestination as e:
-                    logger.info(str(e))
-                    continue
                 except RequestSendFailed as e:
                     logger.info("Failed to get backfill from %s because %s", dom, e)
-                    continue
-                except FederationDeniedError as e:
-                    logger.info(e)
                     continue
                 except Exception as e:
                     logger.exception("Failed to backfill from %s because %s", dom, e)
@@ -1017,7 +1022,9 @@ class FederationHandler:
 
         context = EventContext.for_outlier(self._storage_controllers)
 
-        await self._bulk_push_rule_evaluator.action_for_event_by_user(event, context)
+        await self._bulk_push_rule_evaluator.action_for_events_by_user(
+            [(event, context)]
+        )
         try:
             await self._federation_event_handler.persist_events_and_notify(
                 event.room_id, [(event, context)]
@@ -1226,7 +1233,9 @@ class FederationHandler:
     async def on_backfill_request(
         self, origin: str, room_id: str, pdu_list: List[str], limit: int
     ) -> List[EventBase]:
-        await self._event_auth_handler.assert_host_in_room(room_id, origin)
+        # We allow partially joined rooms since in this case we are filtering out
+        # non-local events in `filter_events_for_server`.
+        await self._event_auth_handler.assert_host_in_room(room_id, origin, True)
 
         # Synapse asks for 100 events per backfill request. Do not allow more.
         limit = min(limit, 100)
@@ -1247,7 +1256,7 @@ class FederationHandler:
         )
 
         events = await filter_events_for_server(
-            self._storage_controllers, origin, events
+            self._storage_controllers, origin, self.server_name, events
         )
 
         return events
@@ -1278,7 +1287,7 @@ class FederationHandler:
         await self._event_auth_handler.assert_host_in_room(event.room_id, origin)
 
         events = await filter_events_for_server(
-            self._storage_controllers, origin, [event]
+            self._storage_controllers, origin, self.server_name, [event]
         )
         event = events[0]
         return event
@@ -1291,7 +1300,9 @@ class FederationHandler:
         latest_events: List[str],
         limit: int,
     ) -> List[EventBase]:
-        await self._event_auth_handler.assert_host_in_room(room_id, origin)
+        # We allow partially joined rooms since in this case we are filtering out
+        # non-local events in `filter_events_for_server`.
+        await self._event_auth_handler.assert_host_in_room(room_id, origin, True)
 
         # Only allow up to 20 events to be retrieved per request.
         limit = min(limit, 20)
@@ -1304,7 +1315,7 @@ class FederationHandler:
         )
 
         missing_events = await filter_events_for_server(
-            self._storage_controllers, origin, missing_events
+            self._storage_controllers, origin, self.server_name, missing_events
         )
 
         return missing_events
@@ -1332,32 +1343,53 @@ class FederationHandler:
             )
 
             EventValidator().validate_builder(builder)
-            event, context = await self.event_creation_handler.create_new_client_event(
-                builder=builder
-            )
 
-            event, context = await self.add_display_name_to_third_party_invite(
-                room_version_obj, event_dict, event, context
-            )
+            # Try several times, it could fail with PartialStateConflictError
+            # in send_membership_event, cf comment in except block.
+            max_retries = 5
+            for i in range(max_retries):
+                try:
+                    (
+                        event,
+                        context,
+                    ) = await self.event_creation_handler.create_new_client_event(
+                        builder=builder
+                    )
 
-            EventValidator().validate_new(event, self.config)
+                    event, context = await self.add_display_name_to_third_party_invite(
+                        room_version_obj, event_dict, event, context
+                    )
 
-            # We need to tell the transaction queue to send this out, even
-            # though the sender isn't a local user.
-            event.internal_metadata.send_on_behalf_of = self.hs.hostname
+                    EventValidator().validate_new(event, self.config)
 
-            try:
-                validate_event_for_room_version(event)
-                await self._event_auth_handler.check_auth_rules_from_context(event)
-            except AuthError as e:
-                logger.warning("Denying new third party invite %r because %s", event, e)
-                raise e
+                    # We need to tell the transaction queue to send this out, even
+                    # though the sender isn't a local user.
+                    event.internal_metadata.send_on_behalf_of = self.hs.hostname
 
-            await self._check_signature(event, context)
+                    try:
+                        validate_event_for_room_version(event)
+                        await self._event_auth_handler.check_auth_rules_from_context(
+                            event
+                        )
+                    except AuthError as e:
+                        logger.warning(
+                            "Denying new third party invite %r because %s", event, e
+                        )
+                        raise e
 
-            # We retrieve the room member handler here as to not cause a cyclic dependency
-            member_handler = self.hs.get_room_member_handler()
-            await member_handler.send_membership_event(None, event, context)
+                    await self._check_signature(event, context)
+
+                    # We retrieve the room member handler here as to not cause a cyclic dependency
+                    member_handler = self.hs.get_room_member_handler()
+                    await member_handler.send_membership_event(None, event, context)
+
+                    break
+                except PartialStateConflictError as e:
+                    # Persisting couldn't happen because the room got un-partial stated
+                    # in the meantime and context needs to be recomputed, so let's do so.
+                    if i == max_retries - 1:
+                        raise e
+                    pass
         else:
             destinations = {x.split(":", 1)[-1] for x in (sender_user_id, room_id)}
 
@@ -1389,28 +1421,46 @@ class FederationHandler:
             room_version_obj, event_dict
         )
 
-        event, context = await self.event_creation_handler.create_new_client_event(
-            builder=builder
-        )
-        event, context = await self.add_display_name_to_third_party_invite(
-            room_version_obj, event_dict, event, context
-        )
+        # Try several times, it could fail with PartialStateConflictError
+        # in send_membership_event, cf comment in except block.
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                (
+                    event,
+                    context,
+                ) = await self.event_creation_handler.create_new_client_event(
+                    builder=builder
+                )
+                event, context = await self.add_display_name_to_third_party_invite(
+                    room_version_obj, event_dict, event, context
+                )
 
-        try:
-            validate_event_for_room_version(event)
-            await self._event_auth_handler.check_auth_rules_from_context(event)
-        except AuthError as e:
-            logger.warning("Denying third party invite %r because %s", event, e)
-            raise e
-        await self._check_signature(event, context)
+                try:
+                    validate_event_for_room_version(event)
+                    await self._event_auth_handler.check_auth_rules_from_context(event)
+                except AuthError as e:
+                    logger.warning("Denying third party invite %r because %s", event, e)
+                    raise e
+                await self._check_signature(event, context)
 
-        # We need to tell the transaction queue to send this out, even
-        # though the sender isn't a local user.
-        event.internal_metadata.send_on_behalf_of = get_domain_from_id(event.sender)
+                # We need to tell the transaction queue to send this out, even
+                # though the sender isn't a local user.
+                event.internal_metadata.send_on_behalf_of = get_domain_from_id(
+                    event.sender
+                )
 
-        # We retrieve the room member handler here as to not cause a cyclic dependency
-        member_handler = self.hs.get_room_member_handler()
-        await member_handler.send_membership_event(None, event, context)
+                # We retrieve the room member handler here as to not cause a cyclic dependency
+                member_handler = self.hs.get_room_member_handler()
+                await member_handler.send_membership_event(None, event, context)
+
+                break
+            except PartialStateConflictError as e:
+                # Persisting couldn't happen because the room got un-partial stated
+                # in the meantime and context needs to be recomputed, so let's do so.
+                if i == max_retries - 1:
+                    raise e
+                pass
 
     async def add_display_name_to_third_party_invite(
         self,
@@ -1591,8 +1641,8 @@ class FederationHandler:
         Fetch the complexity of a remote room over federation.
 
         Args:
-            remote_room_hosts (list[str]): The remote servers to ask.
-            room_id (str): The room ID to ask about.
+            remote_room_hosts: The remote servers to ask.
+            room_id: The room ID to ask about.
 
         Returns:
             Dict contains the complexity
@@ -1682,6 +1732,9 @@ class FederationHandler:
                     self._storage_controllers.state.notify_room_un_partial_stated(
                         room_id
                     )
+                    # Poke the notifier so that other workers see the write to
+                    # the un-partial-stated rooms stream.
+                    self._notifier.notify_replication()
 
                     # TODO(faster_joins) update room stats and user directory?
                     #   https://github.com/matrix-org/synapse/issues/12814

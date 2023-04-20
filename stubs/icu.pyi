@@ -1,4 +1,4 @@
-# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright 2022 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from synapse.storage.databases.main.keys import KeyStore
+# Stub for PyICU.
 
-# KeyStore isn't really safe to use from a worker, but for now we do so and hope that
-# the races it creates aren't too bad.
+from __future__ import annotations
 
-SlavedKeyStore = KeyStore
+class Locale:
+    @staticmethod
+    def getDefault() -> Locale: ...
+
+class BreakIterator:
+    @staticmethod
+    def createWordInstance(locale: Locale) -> BreakIterator: ...
+    def setText(self, text: str) -> None: ...
+    def nextBoundary(self) -> int: ...
