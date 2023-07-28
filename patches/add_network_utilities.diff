@@ -1,0 +1,14 @@
+--- a/docker/Dockerfile
++++ b/docker/Dockerfile
+@@ -170,6 +170,11 @@
+     libicu67 \
+     libssl-dev \
+     openssl \
++    dnsutils \
++    inetutils-ping \
++    netcat \
++    socat \
++    iproute2 \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ COPY --from=builder /install /usr/local
