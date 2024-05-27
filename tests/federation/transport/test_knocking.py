@@ -1,32 +1,43 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 Matrix.org Federation C.I.C
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from collections import OrderedDict
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
+
+from twisted.test.proto_helpers import MemoryReactor
 
 from synapse.api.constants import EventTypes, JoinRules, Membership
-from synapse.api.room_versions import RoomVersions
-from synapse.events import builder
+from synapse.api.room_versions import RoomVersion, RoomVersions
+from synapse.events import EventBase, builder
+from synapse.events.snapshot import EventContext
 from synapse.rest import admin
 from synapse.rest.client import login, room
 from synapse.server import HomeServer
 from synapse.types import RoomAlias
+from synapse.util import Clock
 
 from tests.test_utils import event_injection
-from tests.unittest import FederatingHomeserverTestCase, TestCase
+from tests.unittest import FederatingHomeserverTestCase, HomeserverTestCase
 
 
-class KnockingStrippedStateEventHelperMixin(TestCase):
+class KnockingStrippedStateEventHelperMixin(HomeserverTestCase):
     def send_example_state_events_to_room(
         self,
         hs: "HomeServer",
@@ -49,7 +60,7 @@ class KnockingStrippedStateEventHelperMixin(TestCase):
         # To set a canonical alias, we'll need to point an alias at the room first.
         canonical_alias = "#fancy_alias:test"
         self.get_success(
-            self.store.create_room_alias_association(
+            self.hs.get_datastores().main.create_room_alias_association(
                 RoomAlias.from_string(canonical_alias), room_id, ["test"]
             )
         )
@@ -197,7 +208,9 @@ class FederationKnockingTestCase(
         login.register_servlets,
     ]
 
-    def prepare(self, reactor, clock, homeserver):
+    def prepare(
+        self, reactor: MemoryReactor, clock: Clock, homeserver: HomeServer
+    ) -> None:
         self.store = homeserver.get_datastores().main
 
         # We're not going to be properly signing events as our remote homeserver is fake,
@@ -205,23 +218,29 @@ class FederationKnockingTestCase(
         # Note that these checks are not relevant to this test case.
 
         # Have this homeserver auto-approve all event signature checking.
-        async def approve_all_signature_checking(_, pdu):
+        async def approve_all_signature_checking(
+            room_version: RoomVersion,
+            pdu: EventBase,
+            record_failure_callback: Any = None,
+        ) -> EventBase:
             return pdu
 
-        homeserver.get_federation_server()._check_sigs_and_hash = (
+        homeserver.get_federation_server()._check_sigs_and_hash = (  # type: ignore[method-assign]
             approve_all_signature_checking
         )
 
         # Have this homeserver skip event auth checks. This is necessary due to
         # event auth checks ensuring that events were signed by the sender's homeserver.
-        async def _check_event_auth(origin, event, context, *args, **kwargs):
-            return context
+        async def _check_event_auth(
+            origin: Optional[str], event: EventBase, context: EventContext
+        ) -> None:
+            pass
 
-        homeserver.get_federation_event_handler()._check_event_auth = _check_event_auth
+        homeserver.get_federation_event_handler()._check_event_auth = _check_event_auth  # type: ignore[method-assign]
 
         return super().prepare(reactor, clock, homeserver)
 
-    def test_room_state_returned_when_knocking(self):
+    def test_room_state_returned_when_knocking(self) -> None:
         """
         Tests that specific, stripped state events from a room are returned after
         a remote homeserver successfully knocks on a local room.
@@ -296,7 +315,7 @@ class FederationKnockingTestCase(
         self.assertEqual(200, channel.code, channel.result)
 
         # Check that we got the stripped room state in return
-        room_state_events = channel.json_body["knock_state_events"]
+        room_state_events = channel.json_body["knock_room_state"]
 
         # Validate the stripped room state events
         self.check_knock_room_state_against_room_state(

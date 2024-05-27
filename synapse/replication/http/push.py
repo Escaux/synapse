@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, Tuple
@@ -18,7 +25,6 @@ from typing import TYPE_CHECKING, Tuple
 from twisted.web.server import Request
 
 from synapse.http.server import HttpServer
-from synapse.http.servlet import parse_json_object_from_request
 from synapse.replication.http._base import ReplicationEndpoint
 from synapse.types import JsonDict
 
@@ -61,10 +67,8 @@ class ReplicationRemovePusherRestServlet(ReplicationEndpoint):
         return payload
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request, user_id: str
+        self, request: Request, content: JsonDict, user_id: str
     ) -> Tuple[int, JsonDict]:
-        content = parse_json_object_from_request(request)
-
         app_id = content["app_id"]
         pushkey = content["pushkey"]
 
@@ -73,5 +77,46 @@ class ReplicationRemovePusherRestServlet(ReplicationEndpoint):
         return 200, {}
 
 
+class ReplicationCopyPusherRestServlet(ReplicationEndpoint):
+    """Copies push rules from an old room to new room.
+
+    Request format:
+
+        POST /_synapse/replication/copy_push_rules/:user_id/:old_room_id/:new_room_id
+
+        {}
+
+    """
+
+    NAME = "copy_push_rules"
+    PATH_ARGS = ("user_id", "old_room_id", "new_room_id")
+    CACHE = False
+
+    def __init__(self, hs: "HomeServer"):
+        super().__init__(hs)
+
+        self._store = hs.get_datastores().main
+
+    @staticmethod
+    async def _serialize_payload(user_id: str, old_room_id: str, new_room_id: str) -> JsonDict:  # type: ignore[override]
+        return {}
+
+    async def _handle_request(  # type: ignore[override]
+        self,
+        request: Request,
+        content: JsonDict,
+        user_id: str,
+        old_room_id: str,
+        new_room_id: str,
+    ) -> Tuple[int, JsonDict]:
+
+        await self._store.copy_push_rules_from_room_to_room_for_user(
+            old_room_id, new_room_id, user_id
+        )
+
+        return 200, {}
+
+
 def register_servlets(hs: "HomeServer", http_server: HttpServer) -> None:
     ReplicationRemovePusherRestServlet(hs).register(http_server)
+    ReplicationCopyPusherRestServlet(hs).register(http_server)

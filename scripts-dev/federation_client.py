@@ -1,19 +1,24 @@
 #!/usr/bin/env python
 #
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
-# Copyright 2017 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 
 """
@@ -136,11 +141,11 @@ def request(
         authorization_headers.append(header)
         print("Authorization: %s" % header, file=sys.stderr)
 
-    dest = "matrix://%s%s" % (destination, path)
+    dest = "matrix-federation://%s%s" % (destination, path)
     print("Requesting %s" % dest, file=sys.stderr)
 
     s = requests.Session()
-    s.mount("matrix://", MatrixConnectionAdapter())
+    s.mount("matrix-federation://", MatrixConnectionAdapter())
 
     headers: Dict[str, str] = {
         "Authorization": authorization_headers[0],
@@ -247,7 +252,7 @@ def main() -> None:
 
 
 def read_args_from_config(args: argparse.Namespace) -> None:
-    with open(args.config, "r") as fh:
+    with open(args.config) as fh:
         config = yaml.safe_load(fh)
 
         if not args.server_name:
@@ -329,6 +334,17 @@ class MatrixConnectionAdapter(HTTPAdapter):
                 raise ValueError("Invalid host:port '%s'" % (server_name,))
             return out[0], port, out[0]
 
+        # Look up SRV for Matrix 1.8 `matrix-fed` service first
+        try:
+            srv = srvlookup.lookup("matrix-fed", "tcp", server_name)[0]
+            print(
+                f"SRV lookup on _matrix-fed._tcp.{server_name} gave {srv}",
+                file=sys.stderr,
+            )
+            return srv.host, srv.port, server_name
+        except Exception:
+            pass
+        # Fall back to deprecated `matrix` service
         try:
             srv = srvlookup.lookup("matrix", "tcp", server_name)[0]
             print(
@@ -337,6 +353,7 @@ class MatrixConnectionAdapter(HTTPAdapter):
             )
             return srv.host, srv.port, server_name
         except Exception:
+            # Fall even further back to just port 8448
             return server_name, 8448, server_name
 
     @staticmethod

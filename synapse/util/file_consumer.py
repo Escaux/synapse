@@ -1,19 +1,25 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import queue
-from typing import BinaryIO, Optional, Union, cast
+from typing import Any, BinaryIO, Optional, Union, cast
 
 from twisted.internet import threads
 from twisted.internet.defer import Deferred
@@ -58,7 +64,9 @@ class BackgroundFileConsumer:
         self._bytes_queue: queue.Queue[Optional[bytes]] = queue.Queue()
 
         # Deferred that is resolved when finished writing
-        self._finished_deferred: Optional[Deferred[None]] = None
+        #
+        # This is really Deferred[None], but mypy doesn't seem to like that.
+        self._finished_deferred: Optional[Deferred[Any]] = None
 
         # If the _writer thread throws an exception it gets stored here.
         self._write_exception: Optional[Exception] = None
@@ -80,9 +88,13 @@ class BackgroundFileConsumer:
         self.streaming = streaming
         self._finished_deferred = run_in_background(
             threads.deferToThreadPool,
-            self._reactor,
-            self._reactor.getThreadPool(),
-            self._writer,
+            # mypy seems to get confused with the chaining of ParamSpec from
+            # run_in_background to deferToThreadPool.
+            #
+            # For Twisted trunk, ignore arg-type; for Twisted release ignore unused-ignore.
+            self._reactor,  # type: ignore[arg-type,unused-ignore]
+            self._reactor.getThreadPool(),  # type: ignore[arg-type,unused-ignore]
+            self._writer,  # type: ignore[arg-type,unused-ignore]
         )
         if not streaming:
             self._producer.resumeProducing()

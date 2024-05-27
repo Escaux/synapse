@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 
 """
@@ -18,11 +25,11 @@ This migration adds triggers to the partial_state_events tables to enforce uniqu
 
 Triggers cannot be expressed in .sql files, so we have to use a separate file.
 """
+from synapse.storage.database import LoggingTransaction
 from synapse.storage.engines import BaseDatabaseEngine, PostgresEngine, Sqlite3Engine
-from synapse.storage.types import Cursor
 
 
-def run_create(cur: Cursor, database_engine: BaseDatabaseEngine, *args, **kwargs):
+def run_create(cur: LoggingTransaction, database_engine: BaseDatabaseEngine) -> None:
     # complain if the room_id in partial_state_events doesn't match
     # that in `events`. We already have a fk constraint which ensures that the event
     # exists in `events`, so all we have to do is raise if there is a row with a

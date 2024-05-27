@@ -26,9 +26,9 @@ for most users.
 #### Docker images and Ansible playbooks
 
 There is an official synapse image available at
-<https://hub.docker.com/r/matrixdotorg/synapse> which can be used with
-the docker-compose file available at
-[contrib/docker](https://github.com/matrix-org/synapse/tree/develop/contrib/docker).
+<https://hub.docker.com/r/matrixdotorg/synapse> or at [`ghcr.io/element-hq/synapse`](https://ghcr.io/element-hq/synapse)
+which can be used with the docker-compose file available at
+[contrib/docker](https://github.com/element-hq/synapse/tree/develop/contrib/docker).
 Further information on this including configuration options is available in the README
 on hub.docker.com.
 
@@ -37,7 +37,7 @@ Dockerfile to automate a synapse server in a single Docker image, at
 <https://hub.docker.com/r/avhost/docker-matrix/tags/>
 
 Slavi Pantaleev has created an Ansible playbook,
-which installs the offical Docker image of Matrix Synapse
+which installs the official Docker image of Matrix Synapse
 along with many other Matrix-related services (Postgres database, Element, coturn,
 ma1sd, SSL support, etc.).
 For more details, see
@@ -48,9 +48,11 @@ For more details, see
 ##### Matrix.org packages
 
 Matrix.org provides Debian/Ubuntu packages of Synapse, for the amd64
-architecture via <https://packages.matrix.org/debian/>.  
+architecture via <https://packages.matrix.org/debian/>.
 
 To install the latest release:
+
+TODO UPDATE ALL THIS
 
 ```sh
 sudo apt install -y lsb-release wget apt-transport-https
@@ -93,7 +95,7 @@ For `bookworm` and `sid`, it can be installed simply with:
 sudo apt install matrix-synapse
 ```
 
-Synapse is also avaliable in `bullseye-backports`.  Please
+Synapse is also available in `bullseye-backports`.  Please
 see the [Debian documentation](https://backports.debian.org/Instructions/)
 for information on how to use backports.
 
@@ -135,8 +137,8 @@ Unofficial package are built for SLES 15 in the openSUSE:Backports:SLE-15 reposi
 
 #### ArchLinux
 
-The quickest way to get up and running with ArchLinux is probably with the community package
-<https://archlinux.org/packages/community/x86_64/matrix-synapse/>, which should pull in most of
+The quickest way to get up and running with ArchLinux is probably with the package provided by ArchLinux
+<https://archlinux.org/packages/extra/x86_64/matrix-synapse/>, which should pull in most of
 the necessary dependencies.
 
 pip may be outdated (6.0.7-1 and needs to be upgraded to 6.0.8-1 ):
@@ -153,6 +155,14 @@ installing under virtualenv):
 ```sh
 sudo pip uninstall py-bcrypt
 sudo pip install py-bcrypt
+```
+
+#### Alpine Linux
+
+6543 maintains [Synapse packages for Alpine Linux](https://pkgs.alpinelinux.org/packages?name=synapse&branch=edge) in the community repository. Install with:
+
+```sh
+sudo apk add synapse
 ```
 
 #### Void Linux
@@ -200,7 +210,7 @@ When following this route please make sure that the [Platform-specific prerequis
 System requirements:
 
 - POSIX-compliant system (tested on Linux & OS X)
-- Python 3.7 or later, up to Python 3.11.
+- Python 3.8 or later, up to Python 3.11.
 - At least 1GB of free RAM if you want to join large public rooms like #matrix:matrix.org
 
 If building on an uncommon architecture for which pre-built wheels are
@@ -249,9 +259,9 @@ users, etc.) to the developers via the `--report-stats` argument.
 
 This command will generate you a config file that you can then customise, but it will
 also generate a set of keys for you. These keys will allow your homeserver to
-identify itself to other homeserver, so don't lose or delete them. It would be
+identify itself to other homeservers, so don't lose or delete them. It would be
 wise to back them up somewhere safe. (If, for whatever reason, you do need to
-change your homeserver's keys, you may find that other homeserver have the
+change your homeserver's keys, you may find that other homeservers have the
 old key cached. If you update the signing key, you should change the name of the
 key in the `<server name>.signing.key` file (the second word) to something
 different. See the [spec](https://matrix.org/docs/spec/server_server/latest.html#retrieving-server-keys) for more information on key management).
@@ -315,6 +325,17 @@ Some extra dependencies may be needed. You can use Homebrew (https://brew.sh) fo
 
 You may need to install icu, and make the icu binaries and libraries accessible.
 Please follow [the official instructions of PyICU](https://pypi.org/project/PyICU/) to do so.
+
+If you're struggling to get icu discovered, and see:
+```
+  RuntimeError:
+  Please install pkg-config on your system or set the ICU_VERSION environment
+  variable to the version of ICU you have installed.
+```
+despite it being installed and having your `PATH` updated, you can omit this dependency by
+not specifying `--extras all` to `poetry`. If using postgres, you can install Synapse via
+`poetry install --extras saml2 --extras oidc --extras postgres --extras opentracing --extras redis --extras sentry`.
+ICU is not a hard dependency on getting a working installation.
 
 On ARM-based Macs you may also need to install libjpeg and libpq:
 ```sh
@@ -438,9 +459,9 @@ listeners:
   ```
 
 - You will also need to add the options `tls_certificate_path` and
-  `tls_private_key_path`. to your configuration file. You will need to manage provisioning of 
+  `tls_private_key_path`. to your configuration file. You will need to manage provisioning of
    these certificates yourself.
-- You can find more information about these options as well as how to configure synapse in the 
+- You can find more information about these options as well as how to configure synapse in the
   [configuration manual](../usage/configuration/config_documentation.md).
 
   If you are using your own certificate, be sure to use a `.pem` file that

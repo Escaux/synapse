@@ -1,17 +1,23 @@
 #!/usr/bin/env python
-# Copyright 2022 The Matrix.org Foundation C.I.C.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 # Calculate the trial jobs to run based on if we're in a PR or not.
 
@@ -29,11 +35,12 @@ IS_PR = os.environ["GITHUB_REF"].startswith("refs/pull/")
 
 # First calculate the various trial jobs.
 #
-# For each type of test we only run on Py3.7 on PRs
+# For PRs, we only run each type of test with the oldest Python version supported (which
+# is Python 3.8 right now)
 
 trial_sqlite_tests = [
     {
-        "python-version": "3.7",
+        "python-version": "3.8",
         "database": "sqlite",
         "extras": "all",
     }
@@ -46,13 +53,12 @@ if not IS_PR:
             "database": "sqlite",
             "extras": "all",
         }
-        for version in ("3.8", "3.9", "3.10", "3.11")
+        for version in ("3.9", "3.10", "3.11", "3.12")
     )
-
 
 trial_postgres_tests = [
     {
-        "python-version": "3.7",
+        "python-version": "3.8",
         "database": "postgres",
         "postgres-version": "11",
         "extras": "all",
@@ -62,16 +68,16 @@ trial_postgres_tests = [
 if not IS_PR:
     trial_postgres_tests.append(
         {
-            "python-version": "3.11",
+            "python-version": "3.12",
             "database": "postgres",
-            "postgres-version": "15",
+            "postgres-version": "16",
             "extras": "all",
         }
     )
 
 trial_no_extra_tests = [
     {
-        "python-version": "3.7",
+        "python-version": "3.8",
         "database": "sqlite",
         "extras": "",
     }
@@ -109,19 +115,29 @@ sytest_tests = [
         "postgres": "multi-postgres",
         "workers": "workers",
     },
+    {
+        "sytest-tag": "focal",
+        "postgres": "multi-postgres",
+        "workers": "workers",
+        "reactor": "asyncio",
+    },
 ]
 
 if not IS_PR:
     sytest_tests.extend(
         [
             {
-                "sytest-tag": "testing",
-                "postgres": "postgres",
+                "sytest-tag": "focal",
+                "reactor": "asyncio",
             },
             {
-                "sytest-tag": "buster",
-                "postgres": "multi-postgres",
-                "workers": "workers",
+                "sytest-tag": "focal",
+                "postgres": "postgres",
+                "reactor": "asyncio",
+            },
+            {
+                "sytest-tag": "testing",
+                "postgres": "postgres",
             },
         ]
     )

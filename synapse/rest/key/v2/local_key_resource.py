@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 import re
@@ -33,6 +40,8 @@ logger = logging.getLogger(__name__)
 class LocalKey(RestServlet):
     """HTTP resource containing encoding the TLS X.509 certificate and NACL
     signature verification keys for this server::
+
+        GET /_matrix/key/v2/server HTTP/1.1
 
         GET /_matrix/key/v2/server/a.key.id HTTP/1.1
 
@@ -100,6 +109,15 @@ class LocalKey(RestServlet):
     def on_GET(
         self, request: Request, key_id: Optional[str] = None
     ) -> Tuple[int, JsonDict]:
+        # Matrix 1.6 drops support for passing the key_id, this is incompatible
+        # with earlier versions and is allowed in order to support both.
+        # A warning is issued to help determine when it is safe to drop this.
+        if key_id:
+            logger.warning(
+                "Request for local server key with deprecated key ID (logging to determine usage level for future removal): %s",
+                key_id,
+            )
+
         time_now = self.clock.time_msec()
         # Update the expiry time if less than half the interval remains.
         if time_now + self.config.key.key_refresh_interval / 2 > self.valid_until_ts:

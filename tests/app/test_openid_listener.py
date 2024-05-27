@@ -1,41 +1,52 @@
-# Copyright 2019 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
+from typing import List
 from unittest.mock import Mock, patch
 
 from parameterized import parameterized
 
+from twisted.test.proto_helpers import MemoryReactor
+
 from synapse.app.generic_worker import GenericWorkerServer
 from synapse.app.homeserver import SynapseHomeServer
 from synapse.config.server import parse_listener_def
+from synapse.server import HomeServer
+from synapse.types import JsonDict
+from synapse.util import Clock
 
 from tests.server import make_request
 from tests.unittest import HomeserverTestCase
 
 
 class FederationReaderOpenIDListenerTests(HomeserverTestCase):
-    def make_homeserver(self, reactor, clock):
-        hs = self.setup_test_homeserver(
-            federation_http_client=None, homeserver_to_use=GenericWorkerServer
-        )
+    def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
+        hs = self.setup_test_homeserver(homeserver_to_use=GenericWorkerServer)
         return hs
 
-    def default_config(self):
+    def default_config(self) -> JsonDict:
         conf = super().default_config()
-        # we're using FederationReaderServer, which uses a SlavedStore, so we
+        # we're using GenericWorkerServer, which uses a GenericWorkerStore, so we
         # have to tell the FederationHandler not to try to access stuff that is only
         # in the primary store.
         conf["worker_app"] = "yes"
+        conf["instance_map"] = {"main": {"host": "127.0.0.1", "port": 0}}
 
         return conf
 
@@ -47,7 +58,7 @@ class FederationReaderOpenIDListenerTests(HomeserverTestCase):
             (["openid"], "auth_fail"),
         ]
     )
-    def test_openid_listener(self, names, expectation):
+    def test_openid_listener(self, names: List[str], expectation: str) -> None:
         """
         Test different openid listener configurations.
 
@@ -61,7 +72,9 @@ class FederationReaderOpenIDListenerTests(HomeserverTestCase):
         }
 
         # Listen with the config
-        self.hs._listen_http(parse_listener_def(0, config))
+        hs = self.hs
+        assert isinstance(hs, GenericWorkerServer)
+        hs._listen_http(parse_listener_def(0, config))
 
         # Grab the resource from the site that was told to listen
         site = self.reactor.tcpServers[0][1]
@@ -81,10 +94,8 @@ class FederationReaderOpenIDListenerTests(HomeserverTestCase):
 
 @patch("synapse.app.homeserver.KeyResource", new=Mock())
 class SynapseHomeserverOpenIDListenerTests(HomeserverTestCase):
-    def make_homeserver(self, reactor, clock):
-        hs = self.setup_test_homeserver(
-            federation_http_client=None, homeserver_to_use=SynapseHomeServer
-        )
+    def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
+        hs = self.setup_test_homeserver(homeserver_to_use=SynapseHomeServer)
         return hs
 
     @parameterized.expand(
@@ -95,7 +106,7 @@ class SynapseHomeserverOpenIDListenerTests(HomeserverTestCase):
             (["openid"], "auth_fail"),
         ]
     )
-    def test_openid_listener(self, names, expectation):
+    def test_openid_listener(self, names: List[str], expectation: str) -> None:
         """
         Test different openid listener configurations.
 
@@ -109,7 +120,9 @@ class SynapseHomeserverOpenIDListenerTests(HomeserverTestCase):
         }
 
         # Listen with the config
-        self.hs._listener_http(self.hs.config, parse_listener_def(0, config))
+        hs = self.hs
+        assert isinstance(hs, SynapseHomeServer)
+        hs._listener_http(self.hs.config, parse_listener_def(0, config))
 
         # Grab the resource from the site that was told to listen
         site = self.reactor.tcpServers[0][1]

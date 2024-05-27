@@ -1,17 +1,25 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
+import abc
 import base64
 import logging
 from typing import Optional, Union
@@ -39,8 +47,14 @@ class ProxyConnectError(ConnectError):
     pass
 
 
-@attr.s(auto_attribs=True)
 class ProxyCredentials:
+    @abc.abstractmethod
+    def as_proxy_authorization_value(self) -> bytes:
+        raise NotImplementedError()
+
+
+@attr.s(auto_attribs=True)
+class BasicProxyCredentials(ProxyCredentials):
     username_password: bytes
 
     def as_proxy_authorization_value(self) -> bytes:
@@ -52,7 +66,18 @@ class ProxyCredentials:
             a Proxy-Authorization header.
         """
         # Encode as base64 and prepend the authorization type
-        return b"Basic " + base64.encodebytes(self.username_password)
+        return b"Basic " + base64.b64encode(self.username_password)
+
+
+@attr.s(auto_attribs=True)
+class BearerProxyCredentials(ProxyCredentials):
+    access_token: bytes
+
+    def as_proxy_authorization_value(self) -> bytes:
+        """
+        Return the value for a Proxy-Authorization header (i.e. 'Bearer xxx').
+        """
+        return b"Bearer " + self.access_token
 
 
 @implementer(IStreamClientEndpoint)

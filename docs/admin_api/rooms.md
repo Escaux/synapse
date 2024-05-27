@@ -419,7 +419,7 @@ The following query parameters are available:
 
 * `from` (required) - The token to start returning events from. This token can be obtained from a prev_batch
   or next_batch token returned by the /sync endpoint, or from an end token returned by a previous request to this endpoint.
-* `to` - The token to spot returning events at.
+* `to` - The token to stop returning events at.
 * `limit` - The maximum number of events to return. Defaults to `10`.
 * `filter` - A JSON RoomEventFilter to filter returned events with.
 * `dir` - The direction to return events from. Either `f` for forwards or `b` for backwards. Setting
@@ -536,7 +536,8 @@ The following query parameters are available:
 
 **Response**
 
-* `event_id` - converted from timestamp
+* `event_id` - The event ID closest to the given timestamp.
+* `origin_server_ts` - The timestamp of the event in milliseconds since the Unix epoch.
 
 # Block Room API
 The Block Room admin API allows server admins to block and unblock rooms,
@@ -912,7 +913,7 @@ With all that being said, if you still want to try and recover the room:
    them handle rejoining themselves.
 
 4. If `new_room_user_id` was given, a 'Content Violation' will have been
-   created. Consider whether you want to delete that roomm.
+   created. Consider whether you want to delete that room.
 
 # Make Room Admin API
 

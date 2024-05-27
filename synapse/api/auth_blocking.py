@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, Optional
@@ -39,7 +46,7 @@ class AuthBlocking:
         self._mau_limits_reserved_threepids = (
             hs.config.server.mau_limits_reserved_threepids
         )
-        self._server_name = hs.hostname
+        self._is_mine_server_name = hs.is_mine_server_name
         self._track_appservice_user_ips = hs.config.appservice.track_appservice_user_ips
 
     async def check_auth_blocking(
@@ -77,7 +84,7 @@ class AuthBlocking:
         if requester:
             if requester.authenticated_entity.startswith("@"):
                 user_id = requester.authenticated_entity
-            elif requester.authenticated_entity == self._server_name:
+            elif self._is_mine_server_name(requester.authenticated_entity):
                 # We never block the server from doing actions on behalf of
                 # users.
                 return

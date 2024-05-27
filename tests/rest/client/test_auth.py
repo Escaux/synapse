@@ -1,17 +1,23 @@
-# Copyright 2018 New Vector
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020-2021 The Matrix.org Foundation C.I.C
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import re
 from http import HTTPStatus
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -34,7 +40,7 @@ from synapse.util import Clock
 from tests import unittest
 from tests.handlers.test_oidc import HAS_OIDC
 from tests.rest.client.utils import TEST_OIDC_CONFIG, TEST_OIDC_ISSUER
-from tests.server import FakeChannel, make_request
+from tests.server import FakeChannel
 from tests.unittest import override_config, skip_unless
 
 
@@ -43,13 +49,15 @@ class DummyRecaptchaChecker(UserInteractiveAuthChecker):
         super().__init__(hs)
         self.recaptcha_attempts: List[Tuple[dict, str]] = []
 
+    def is_enabled(self) -> bool:
+        return True
+
     def check_auth(self, authdict: dict, clientip: str) -> Any:
         self.recaptcha_attempts.append((authdict, clientip))
         return succeed(True)
 
 
 class FallbackAuthTests(unittest.HomeserverTestCase):
-
     servlets = [
         auth.register_servlets,
         register.register_servlets,
@@ -57,7 +65,6 @@ class FallbackAuthTests(unittest.HomeserverTestCase):
     hijack_auth = False
 
     def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
-
         config = self.default_config()
 
         config["enable_registration_captcha"] = True
@@ -1319,16 +1326,8 @@ class OidcBackchannelLogoutTests(unittest.HomeserverTestCase):
         channel = self.submit_logout_token(logout_token)
         self.assertEqual(channel.code, 200)
 
-        # Now try to exchange the login token
-        channel = make_request(
-            self.hs.get_reactor(),
-            self.site,
-            "POST",
-            "/login",
-            content={"type": "m.login.token", "token": login_token},
-        )
-        # It should have failed
-        self.assertEqual(channel.code, 403)
+        # Now try to exchange the login token, it should fail.
+        self.helper.login_via_token(login_token, 403)
 
     @override_config(
         {

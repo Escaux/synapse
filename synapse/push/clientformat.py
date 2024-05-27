@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import copy
 from typing import Any, Dict, List, Optional
@@ -22,7 +29,7 @@ from synapse.types import UserID
 
 def format_push_rules_for_user(
     user: UserID, ruleslist: FilteredPushRules
-) -> Dict[str, Dict[str, list]]:
+) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
     """Converts a list of rawrules and a enabled map into nested dictionaries
     to match the Matrix client-server format for push rules"""
 
@@ -41,11 +48,7 @@ def format_push_rules_for_user(
 
         rulearray.append(template_rule)
 
-        pattern_type = template_rule.pop("pattern_type", None)
-        if pattern_type == "user_id":
-            template_rule["pattern"] = user.to_string()
-        elif pattern_type == "user_localpart":
-            template_rule["pattern"] = user.localpart
+        _convert_type_to_value(template_rule, user)
 
         template_rule["enabled"] = enabled
 
@@ -62,17 +65,18 @@ def format_push_rules_for_user(
         for c in template_rule["conditions"]:
             c.pop("_cache_key", None)
 
-            pattern_type = c.pop("pattern_type", None)
-            if pattern_type == "user_id":
-                c["pattern"] = user.to_string()
-            elif pattern_type == "user_localpart":
-                c["pattern"] = user.localpart
-
-            sender_type = c.pop("sender_type", None)
-            if sender_type == "user_id":
-                c["sender"] = user.to_string()
+            _convert_type_to_value(c, user)
 
     return rules
+
+
+def _convert_type_to_value(rule_or_cond: Dict[str, Any], user: UserID) -> None:
+    for type_key in ("pattern", "value"):
+        type_value = rule_or_cond.pop(f"{type_key}_type", None)
+        if type_value == "user_id":
+            rule_or_cond[type_key] = user.to_string()
+        elif type_value == "user_localpart":
+            rule_or_cond[type_key] = user.localpart
 
 
 def _add_empty_priority_class_arrays(d: Dict[str, list]) -> Dict[str, list]:

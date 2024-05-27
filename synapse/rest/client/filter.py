@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, Tuple
@@ -19,7 +26,7 @@ from synapse.api.errors import AuthError, NotFoundError, StoreError, SynapseErro
 from synapse.http.server import HttpServer
 from synapse.http.servlet import RestServlet, parse_json_object_from_request
 from synapse.http.site import SynapseRequest
-from synapse.types import JsonDict, UserID
+from synapse.types import JsonDict, JsonMapping, UserID
 
 from ._base import client_patterns, set_timeline_upper_limit
 
@@ -31,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 class GetFilterRestServlet(RestServlet):
     PATTERNS = client_patterns("/user/(?P<user_id>[^/]*)/filter/(?P<filter_id>[^/]*)")
+    CATEGORY = "Encryption requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -40,7 +48,7 @@ class GetFilterRestServlet(RestServlet):
 
     async def on_GET(
         self, request: SynapseRequest, user_id: str, filter_id: str
-    ) -> Tuple[int, JsonDict]:
+    ) -> Tuple[int, JsonMapping]:
         target_user = UserID.from_string(user_id)
         requester = await self.auth.get_user_by_req(request)
 
@@ -57,7 +65,7 @@ class GetFilterRestServlet(RestServlet):
 
         try:
             filter_collection = await self.filtering.get_user_filter(
-                user_localpart=target_user.localpart, filter_id=filter_id_int
+                user_id=target_user, filter_id=filter_id_int
             )
         except StoreError as e:
             if e.code != 404:
@@ -69,6 +77,7 @@ class GetFilterRestServlet(RestServlet):
 
 class CreateFilterRestServlet(RestServlet):
     PATTERNS = client_patterns("/user/(?P<user_id>[^/]*)/filter")
+    CATEGORY = "Encryption requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -79,7 +88,6 @@ class CreateFilterRestServlet(RestServlet):
     async def on_POST(
         self, request: SynapseRequest, user_id: str
     ) -> Tuple[int, JsonDict]:
-
         target_user = UserID.from_string(user_id)
         requester = await self.auth.get_user_by_req(request)
 
@@ -93,7 +101,7 @@ class CreateFilterRestServlet(RestServlet):
         set_timeline_upper_limit(content, self.hs.config.server.filter_timeline_limit)
 
         filter_id = await self.filtering.add_user_filter(
-            user_localpart=target_user.localpart, user_filter=content
+            user_id=target_user, user_filter=content
         )
 
         return 200, {"filter_id": str(filter_id)}

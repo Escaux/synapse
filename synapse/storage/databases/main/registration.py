@@ -1,18 +1,24 @@
-# Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2017-2018 New Vector Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019,2020 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 import random
 import re
@@ -143,6 +149,30 @@ class LoginTokenLookupResult:
     """The session ID advertised by the SSO Identity Provider."""
 
 
+@attr.s(frozen=True, slots=True, auto_attribs=True)
+class ThreepidResult:
+    medium: str
+    address: str
+    validated_at: int
+    added_at: int
+
+
+@attr.s(frozen=True, slots=True, auto_attribs=True)
+class ThreepidValidationSession:
+    address: str
+    """address of the 3pid"""
+    medium: str
+    """medium of the 3pid"""
+    client_secret: str
+    """a secret provided by the client for this validation session"""
+    session_id: str
+    """ID of the validation session"""
+    last_send_attempt: int
+    """a number serving to dedupe send attempts for this session"""
+    validated_at: Optional[int]
+    """timestamp of when this session was validated if so"""
+
+
 class RegistrationWorkerStore(CacheInvalidationWorkerStore):
     def __init__(
         self,
@@ -192,76 +222,69 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             )
 
     @cached()
-    async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Deprecated: use get_userinfo_by_id instead"""
+    async def get_user_by_id(self, user_id: str) -> Optional[UserInfo]:
+        """Returns info about the user account, if it exists."""
 
-        def get_user_by_id_txn(txn: LoggingTransaction) -> Optional[Dict[str, Any]]:
+        def get_user_by_id_txn(txn: LoggingTransaction) -> Optional[UserInfo]:
             # We could technically use simple_select_one here, but it would not perform
             # the COALESCEs (unless hacked into the column names), which could yield
             # confusing results.
             txn.execute(
                 """
                 SELECT
-                    name, password_hash, is_guest, admin, consent_version, consent_ts,
+                    name, is_guest, admin, consent_version, consent_ts,
                     consent_server_notice_sent, appservice_id, creation_ts, user_type,
                     deactivated, COALESCE(shadow_banned, FALSE) AS shadow_banned,
-                    COALESCE(approved, TRUE) AS approved
+                    COALESCE(approved, TRUE) AS approved,
+                    COALESCE(locked, FALSE) AS locked,
+                    suspended
                 FROM users
                 WHERE name = ?
                 """,
                 (user_id,),
             )
 
-            rows = self.db_pool.cursor_to_dict(txn)
-
-            if len(rows) == 0:
+            row = txn.fetchone()
+            if not row:
                 return None
 
-            return rows[0]
+            (
+                name,
+                is_guest,
+                admin,
+                consent_version,
+                consent_ts,
+                consent_server_notice_sent,
+                appservice_id,
+                creation_ts,
+                user_type,
+                deactivated,
+                shadow_banned,
+                approved,
+                locked,
+                suspended,
+            ) = row
 
-        row = await self.db_pool.runInteraction(
+            return UserInfo(
+                appservice_id=appservice_id,
+                consent_server_notice_sent=consent_server_notice_sent,
+                consent_version=consent_version,
+                consent_ts=consent_ts,
+                creation_ts=creation_ts,
+                is_admin=bool(admin),
+                is_deactivated=bool(deactivated),
+                is_guest=bool(is_guest),
+                is_shadow_banned=bool(shadow_banned),
+                user_id=UserID.from_string(name),
+                user_type=user_type,
+                approved=bool(approved),
+                locked=bool(locked),
+                suspended=bool(suspended),
+            )
+
+        return await self.db_pool.runInteraction(
             desc="get_user_by_id",
             func=get_user_by_id_txn,
-        )
-
-        if row is not None:
-            # If we're using SQLite our boolean values will be integers. Because we
-            # present some of this data as is to e.g. server admins via REST APIs, we
-            # want to make sure we're returning the right type of data.
-            # Note: when adding a column name to this list, be wary of NULLable columns,
-            # since NULL values will be turned into False.
-            boolean_columns = ["admin", "deactivated", "shadow_banned", "approved"]
-            for column in boolean_columns:
-                if not isinstance(row[column], bool):
-                    row[column] = bool(row[column])
-
-        return row
-
-    async def get_userinfo_by_id(self, user_id: str) -> Optional[UserInfo]:
-        """Get a UserInfo object for a user by user ID.
-
-        Note! Currently uses the cache of `get_user_by_id`. Once that deprecated method is removed,
-        this method should be cached.
-
-        Args:
-             user_id: The user to fetch user info for.
-        Returns:
-            `UserInfo` object if user found, otherwise `None`.
-        """
-        user_data = await self.get_user_by_id(user_id)
-        if not user_data:
-            return None
-        return UserInfo(
-            appservice_id=user_data["appservice_id"],
-            consent_server_notice_sent=user_data["consent_server_notice_sent"],
-            consent_version=user_data["consent_version"],
-            creation_ts=user_data["creation_ts"],
-            is_admin=bool(user_data["admin"]),
-            is_deactivated=bool(user_data["deactivated"]),
-            is_guest=bool(user_data["is_guest"]),
-            is_shadow_banned=bool(user_data["shadow_banned"]),
-            user_id=UserID.from_string(user_data["name"]),
-            user_type=user_data["user_type"],
         )
 
     async def is_trial_user(self, user_id: str) -> bool:
@@ -279,10 +302,10 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
 
         now = self._clock.time_msec()
         days = self.config.server.mau_appservice_trial_days.get(
-            info["appservice_id"], self.config.server.mau_trial_days
+            info.appservice_id, self.config.server.mau_trial_days
         )
         trial_duration_ms = days * 24 * 60 * 60 * 1000
-        is_trial = (now - info["creation_ts"] * 1000) < trial_duration_ms
+        is_trial = (now - info.creation_ts * 1000) < trial_duration_ms
         return is_trial
 
     @cached()
@@ -411,17 +434,14 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
                     account timestamp as milliseconds since the epoch. None if the account
                     has not been renewed using the current token yet.
         """
-        ret_dict = await self.db_pool.simple_select_one(
-            table="account_validity",
-            keyvalues={"renewal_token": renewal_token},
-            retcols=["user_id", "expiration_ts_ms", "token_used_ts_ms"],
-            desc="get_user_from_renewal_token",
-        )
-
-        return (
-            ret_dict["user_id"],
-            ret_dict["expiration_ts_ms"],
-            ret_dict["token_used_ts_ms"],
+        return cast(
+            Tuple[str, int, Optional[int]],
+            await self.db_pool.simple_select_one(
+                table="account_validity",
+                keyvalues={"renewal_token": renewal_token},
+                retcols=["user_id", "expiration_ts_ms", "token_used_ts_ms"],
+                desc="get_user_from_renewal_token",
+            ),
         )
 
     async def get_renewal_token_for_user(self, user_id: str) -> str:
@@ -454,9 +474,9 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         ) -> List[Tuple[str, int]]:
             sql = (
                 "SELECT user_id, expiration_ts_ms FROM account_validity"
-                " WHERE email_sent = ? AND (expiration_ts_ms - ?) <= ?"
+                " WHERE email_sent = FALSE AND (expiration_ts_ms - ?) <= ?"
             )
-            values = [False, now_ms, renew_at]
+            values = [now_ms, renew_at]
             txn.execute(sql, values)
             return cast(List[Tuple[str, int]], txn.fetchall())
 
@@ -550,16 +570,15 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
                 updatevalues={"shadow_banned": shadow_banned},
             )
             # In order for this to apply immediately, clear the cache for this user.
-            tokens = self.db_pool.simple_select_onecol_txn(
+            tokens = self.db_pool.simple_select_list_txn(
                 txn,
                 table="access_tokens",
                 keyvalues={"user_id": user_id},
-                retcol="token",
+                retcols=("token",),
             )
-            for token in tokens:
-                self._invalidate_cache_and_stream(
-                    txn, self.get_user_by_access_token, (token,)
-                )
+            self._invalidate_cache_and_stream_bulk(
+                txn, self.get_user_by_access_token, tokens
+            )
             self._invalidate_cache_and_stream(txn, self.get_user_by_id, (user_id,))
 
         await self.db_pool.runInteraction("set_shadow_banned", set_shadow_banned_txn)
@@ -600,16 +619,31 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         """
 
         txn.execute(sql, (token,))
-        rows = self.db_pool.cursor_to_dict(txn)
+        row = txn.fetchone()
 
-        if rows:
-            row = rows[0]
+        if row:
+            (
+                user_id,
+                is_guest,
+                shadow_banned,
+                token_id,
+                device_id,
+                valid_until_ms,
+                token_owner,
+                token_used,
+            ) = row
 
-            # This field is nullable, ensure it comes out as a boolean
-            if row["token_used"] is None:
-                row["token_used"] = False
-
-            return TokenLookupResult(**row)
+            return TokenLookupResult(
+                user_id=user_id,
+                is_guest=is_guest,
+                shadow_banned=shadow_banned,
+                token_id=token_id,
+                device_id=device_id,
+                valid_until_ms=valid_until_ms,
+                token_owner=token_owner,
+                # This field is nullable, ensure it comes out as a boolean
+                token_used=bool(token_used),
+            )
 
         return None
 
@@ -842,23 +876,24 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         Returns:
             Tuples of (auth_provider, external_id)
         """
-        res = await self.db_pool.simple_select_list(
-            table="user_external_ids",
-            keyvalues={"user_id": mxid},
-            retcols=("auth_provider", "external_id"),
-            desc="get_external_ids_by_user",
+        return cast(
+            List[Tuple[str, str]],
+            await self.db_pool.simple_select_list(
+                table="user_external_ids",
+                keyvalues={"user_id": mxid},
+                retcols=("auth_provider", "external_id"),
+                desc="get_external_ids_by_user",
+            ),
         )
-        return [(r["auth_provider"], r["external_id"]) for r in res]
 
     async def count_all_users(self) -> int:
         """Counts all users registered on the homeserver."""
 
         def _count_users(txn: LoggingTransaction) -> int:
-            txn.execute("SELECT COUNT(*) AS users FROM users")
-            rows = self.db_pool.cursor_to_dict(txn)
-            if rows:
-                return rows[0]["users"]
-            return 0
+            txn.execute("SELECT COUNT(*) FROM users")
+            row = txn.fetchone()
+            assert row is not None
+            return row[0]
 
         return await self.db_pool.runInteraction("count_users", _count_users)
 
@@ -912,11 +947,10 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         """Counts all users without a special user_type registered on the homeserver."""
 
         def _count_users(txn: LoggingTransaction) -> int:
-            txn.execute("SELECT COUNT(*) AS users FROM users where user_type is null")
-            rows = self.db_pool.cursor_to_dict(txn)
-            if rows:
-                return rows[0]["users"]
-            return 0
+            txn.execute("SELECT COUNT(*) FROM users where user_type is null")
+            row = txn.fetchone()
+            assert row is not None
+            return row[0]
 
         return await self.db_pool.runInteraction("count_real_users", _count_users)
 
@@ -960,16 +994,13 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         Returns:
             user id, or None if no user id/threepid mapping exists
         """
-        ret = self.db_pool.simple_select_one_txn(
+        return self.db_pool.simple_select_one_onecol_txn(
             txn,
             "user_threepids",
             {"medium": medium, "address": address},
-            ["user_id"],
+            "user_id",
             True,
         )
-        if ret:
-            return ret["user_id"]
-        return None
 
     async def user_add_threepid(
         self,
@@ -985,13 +1016,25 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             {"user_id": user_id, "validated_at": validated_at, "added_at": added_at},
         )
 
-    async def user_get_threepids(self, user_id: str) -> List[Dict[str, Any]]:
-        return await self.db_pool.simple_select_list(
-            "user_threepids",
-            {"user_id": user_id},
-            ["medium", "address", "validated_at", "added_at"],
-            "user_get_threepids",
+    async def user_get_threepids(self, user_id: str) -> List[ThreepidResult]:
+        results = cast(
+            List[Tuple[str, str, int, int]],
+            await self.db_pool.simple_select_list(
+                "user_threepids",
+                keyvalues={"user_id": user_id},
+                retcols=["medium", "address", "validated_at", "added_at"],
+                desc="user_get_threepids",
+            ),
         )
+        return [
+            ThreepidResult(
+                medium=r[0],
+                address=r[1],
+                validated_at=r[2],
+                added_at=r[3],
+            )
+            for r in results
+        ]
 
     async def user_delete_threepid(
         self, user_id: str, medium: str, address: str
@@ -1000,19 +1043,6 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             "user_threepids",
             keyvalues={"user_id": user_id, "medium": medium, "address": address},
             desc="user_delete_threepid",
-        )
-
-    async def user_delete_threepids(self, user_id: str) -> None:
-        """Delete all threepid this user has bound
-
-        Args:
-             user_id: The user id to delete all threepids of
-
-        """
-        await self.db_pool.simple_delete(
-            "user_threepids",
-            keyvalues={"user_id": user_id},
-            desc="user_delete_threepids",
         )
 
     async def add_user_bound_threepid(
@@ -1043,7 +1073,7 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             desc="add_user_bound_threepid",
         )
 
-    async def user_get_bound_threepids(self, user_id: str) -> List[Dict[str, Any]]:
+    async def user_get_bound_threepids(self, user_id: str) -> List[Tuple[str, str]]:
         """Get the threepids that a user has bound to an identity server through the homeserver
         The homeserver remembers where binds to an identity server occurred. Using this
         method can retrieve those threepids.
@@ -1052,15 +1082,18 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             user_id: The ID of the user to retrieve threepids for
 
         Returns:
-            List of dictionaries containing the following keys:
-                medium (str): The medium of the threepid (e.g "email")
-                address (str): The address of the threepid (e.g "bob@example.com")
+            List of tuples of two strings:
+                medium: The medium of the threepid (e.g "email")
+                address: The address of the threepid (e.g "bob@example.com")
         """
-        return await self.db_pool.simple_select_list(
-            table="user_threepid_id_server",
-            keyvalues={"user_id": user_id},
-            retcols=["medium", "address"],
-            desc="user_get_bound_threepids",
+        return cast(
+            List[Tuple[str, str]],
+            await self.db_pool.simple_select_list(
+                table="user_threepid_id_server",
+                keyvalues={"user_id": user_id},
+                retcols=["medium", "address"],
+                desc="user_get_bound_threepids",
+            ),
         )
 
     async def remove_user_bound_threepid(
@@ -1129,6 +1162,48 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         # Convert the integer into a boolean.
         return res == 1
 
+    @cached()
+    async def get_user_locked_status(self, user_id: str) -> bool:
+        """Retrieve the value for the `locked` property for the provided user.
+
+        Args:
+            user_id: The ID of the user to retrieve the status for.
+
+        Returns:
+            True if the user was locked, false if the user is still active.
+        """
+
+        res = await self.db_pool.simple_select_one_onecol(
+            table="users",
+            keyvalues={"name": user_id},
+            retcol="locked",
+            desc="get_user_locked_status",
+        )
+
+        # Convert the potential integer into a boolean.
+        return bool(res)
+
+    @cached()
+    async def get_user_suspended_status(self, user_id: str) -> bool:
+        """
+        Determine whether the user's account is suspended.
+            Args:
+                user_id: The user ID of the user in question
+            Returns:
+                True if the user's account is suspended, false if it is not suspended or
+                if the user ID cannot be found.
+        """
+
+        res = await self.db_pool.simple_select_one_onecol(
+            table="users",
+            keyvalues={"name": user_id},
+            retcol="suspended",
+            allow_none=True,
+            desc="get_user_suspended",
+        )
+
+        return bool(res)
+
     async def get_threepid_validation_session(
         self,
         medium: Optional[str],
@@ -1136,7 +1211,7 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         address: Optional[str] = None,
         sid: Optional[str] = None,
         validated: Optional[bool] = True,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[ThreepidValidationSession]:
         """Gets a session_id and last_send_attempt (if available) for a
         combination of validation metadata
 
@@ -1151,15 +1226,7 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
                 perform no filtering
 
         Returns:
-            A dict containing the following:
-                * address - address of the 3pid
-                * medium - medium of the 3pid
-                * client_secret - a secret provided by the client for this validation session
-                * session_id - ID of the validation session
-                * send_attempt - a number serving to dedupe send attempts for this session
-                * validated_at - timestamp of when this session was validated if so
-
-                Otherwise None if a validation session is not found
+            A ThreepidValidationSession or None if a validation session is not found
         """
         if not client_secret:
             raise SynapseError(
@@ -1178,7 +1245,7 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
 
         def get_threepid_validation_session_txn(
             txn: LoggingTransaction,
-        ) -> Optional[Dict[str, Any]]:
+        ) -> Optional[ThreepidValidationSession]:
             sql = """
                 SELECT address, session_id, medium, client_secret,
                 last_send_attempt, validated_at
@@ -1193,11 +1260,18 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             sql += " LIMIT 1"
 
             txn.execute(sql, list(keyvalues.values()))
-            rows = self.db_pool.cursor_to_dict(txn)
-            if not rows:
+            row = txn.fetchone()
+            if not row:
                 return None
 
-            return rows[0]
+            return ThreepidValidationSession(
+                address=row[0],
+                session_id=row[1],
+                medium=row[2],
+                client_secret=row[3],
+                last_send_attempt=row[4],
+                validated_at=row[5],
+            )
 
         return await self.db_pool.runInteraction(
             "get_threepid_validation_session", get_threepid_validation_session_txn
@@ -1265,12 +1339,8 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             )
             txn.execute(sql, [])
 
-            res = self.db_pool.cursor_to_dict(txn)
-            if res:
-                for user in res:
-                    self.set_expiration_date_for_user_txn(
-                        txn, user["name"], use_delta=True
-                    )
+            for (name,) in txn.fetchall():
+                self.set_expiration_date_for_user_txn(txn, name, use_delta=True)
 
         await self.db_pool.runInteraction(
             "get_users_with_no_expiration_date",
@@ -1388,16 +1458,15 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         if res is None:
             return False
 
+        uses_allowed, pending, completed, expiry_time = res
+
         # Check if the token has expired
         now = self._clock.time_msec()
-        if res["expiry_time"] and res["expiry_time"] < now:
+        if expiry_time and expiry_time < now:
             return False
 
         # Check if the token has been used up
-        if (
-            res["uses_allowed"]
-            and res["pending"] + res["completed"] >= res["uses_allowed"]
-        ):
+        if uses_allowed and pending + completed >= uses_allowed:
             return False
 
         # Otherwise, the token is valid
@@ -1443,8 +1512,8 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             # Override type because the return type is only optional if
             # allow_none is True, and we don't want mypy throwing errors
             # about None not being indexable.
-            res = cast(
-                Dict[str, Any],
+            pending, completed = cast(
+                Tuple[int, int],
                 self.db_pool.simple_select_one_txn(
                     txn,
                     "registration_tokens",
@@ -1459,8 +1528,8 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
                 "registration_tokens",
                 keyvalues={"token": token},
                 updatevalues={
-                    "completed": res["completed"] + 1,
-                    "pending": res["pending"] - 1,
+                    "completed": completed + 1,
+                    "pending": pending - 1,
                 },
             )
 
@@ -1470,7 +1539,7 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
 
     async def get_registration_tokens(
         self, valid: Optional[bool] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Tuple[str, Optional[int], int, int, Optional[int]]]:
         """List all registration tokens. Used by the admin API.
 
         Args:
@@ -1479,34 +1548,48 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
               Default is None: return all tokens regardless of validity.
 
         Returns:
-            A list of dicts, each containing details of a token.
+            A list of tuples containing:
+                * The token
+                * The number of users allowed (or None)
+                * Whether it is pending
+                * Whether it has been completed
+                * An expiry time (or None if no expiry)
         """
 
         def select_registration_tokens_txn(
             txn: LoggingTransaction, now: int, valid: Optional[bool]
-        ) -> List[Dict[str, Any]]:
+        ) -> List[Tuple[str, Optional[int], int, int, Optional[int]]]:
             if valid is None:
                 # Return all tokens regardless of validity
-                txn.execute("SELECT * FROM registration_tokens")
+                txn.execute(
+                    """
+                    SELECT token, uses_allowed, pending, completed, expiry_time
+                    FROM registration_tokens
+                    """
+                )
 
             elif valid:
                 # Select valid tokens only
-                sql = (
-                    "SELECT * FROM registration_tokens WHERE "
-                    "(uses_allowed > pending + completed OR uses_allowed IS NULL) "
-                    "AND (expiry_time > ? OR expiry_time IS NULL)"
-                )
+                sql = """
+                SELECT token, uses_allowed, pending, completed, expiry_time
+                FROM registration_tokens
+                WHERE (uses_allowed > pending + completed OR uses_allowed IS NULL)
+                    AND (expiry_time > ? OR expiry_time IS NULL)
+                """
                 txn.execute(sql, [now])
 
             else:
                 # Select invalid tokens only
-                sql = (
-                    "SELECT * FROM registration_tokens WHERE "
-                    "uses_allowed <= pending + completed OR expiry_time <= ?"
-                )
+                sql = """
+                SELECT token, uses_allowed, pending, completed, expiry_time
+                FROM registration_tokens
+                WHERE uses_allowed <= pending + completed OR expiry_time <= ?
+                """
                 txn.execute(sql, [now])
 
-            return self.db_pool.cursor_to_dict(txn)
+            return cast(
+                List[Tuple[str, Optional[int], int, int, Optional[int]]], txn.fetchall()
+            )
 
         return await self.db_pool.runInteraction(
             "select_registration_tokens",
@@ -1524,13 +1607,22 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
         Returns:
             A dict, or None if token doesn't exist.
         """
-        return await self.db_pool.simple_select_one(
+        row = await self.db_pool.simple_select_one(
             "registration_tokens",
             keyvalues={"token": token},
             retcols=["token", "uses_allowed", "pending", "completed", "expiry_time"],
             allow_none=True,
             desc="get_one_registration_token",
         )
+        if row is None:
+            return None
+        return {
+            "token": row[0],
+            "uses_allowed": row[1],
+            "pending": row[2],
+            "completed": row[3],
+            "expiry_time": row[4],
+        }
 
     async def generate_registration_token(
         self, length: int, chars: str
@@ -1653,7 +1745,7 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
                 return None
 
             # Get all info about the token so it can be sent in the response
-            return self.db_pool.simple_select_one_txn(
+            result = self.db_pool.simple_select_one_txn(
                 txn,
                 "registration_tokens",
                 keyvalues={"token": token},
@@ -1666,6 +1758,17 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
                 ],
                 allow_none=True,
             )
+
+            if result is None:
+                return result
+
+            return {
+                "token": result[0],
+                "uses_allowed": result[1],
+                "pending": result[2],
+                "completed": result[3],
+                "expiry_time": result[4],
+            }
 
         return await self.db_pool.runInteraction(
             "update_registration_token", _update_registration_token_txn
@@ -1878,11 +1981,13 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
             keyvalues={"token": token},
             updatevalues={"used_ts": ts},
         )
-        user_id = values["user_id"]
-        expiry_ts = values["expiry_ts"]
-        used_ts = values["used_ts"]
-        auth_provider_id = values["auth_provider_id"]
-        auth_provider_session_id = values["auth_provider_session_id"]
+        (
+            user_id,
+            expiry_ts,
+            used_ts,
+            auth_provider_id,
+            auth_provider_session_id,
+        ) = values
 
         # Token was already used
         if used_ts is not None:
@@ -1976,11 +2081,12 @@ class RegistrationWorkerStore(CacheInvalidationWorkerStore):
                 (user_id,),
             )
 
-            rows = self.db_pool.cursor_to_dict(txn)
+            row = txn.fetchone()
+            assert row is not None
 
             # We cast to bool because the value returned by the database engine might
             # be an integer if we're using SQLite.
-            return bool(rows[0]["approved"])
+            return bool(row[0])
 
         return await self.db_pool.runInteraction(
             desc="is_user_pending_approval",
@@ -2026,6 +2132,13 @@ class RegistrationBackgroundUpdateStore(RegistrationWorkerStore):
             unique=False,
         )
 
+        self.db_pool.updates.register_background_index_update(
+            update_name="access_tokens_refresh_token_id_idx",
+            index_name="access_tokens_refresh_token_id_idx",
+            table="access_tokens",
+            columns=("refresh_token_id",),
+        )
+
     async def _background_update_set_deactivated_flag(
         self, progress: JsonDict, batch_size: int
     ) -> int:
@@ -2058,22 +2171,22 @@ class RegistrationBackgroundUpdateStore(RegistrationWorkerStore):
                 (last_user, batch_size),
             )
 
-            rows = self.db_pool.cursor_to_dict(txn)
+            rows = txn.fetchall()
 
             if not rows:
                 return True, 0
 
             rows_processed_nb = 0
 
-            for user in rows:
-                if not user["count_tokens"] and not user["count_threepids"]:
-                    self.set_user_deactivated_status_txn(txn, user["name"], True)
+            for name, count_tokens, count_threepids in rows:
+                if not count_tokens and not count_threepids:
+                    self.set_user_deactivated_status_txn(txn, name, True)
                     rows_processed_nb += 1
 
             logger.info("Marked %d rows as deactivated", rows_processed_nb)
 
             self.db_pool.updates._background_update_progress_txn(
-                txn, "users_set_deactivated_flag", {"user_id": rows[-1]["name"]}
+                txn, "users_set_deactivated_flag", {"user_id": rows[-1][0]}
             )
 
             if batch_size > len(rows):
@@ -2123,6 +2236,62 @@ class RegistrationBackgroundUpdateStore(RegistrationWorkerStore):
         )
         self._invalidate_cache_and_stream(txn, self.get_user_by_id, (user_id,))
         txn.call_after(self.is_guest.invalidate, (user_id,))
+
+    async def set_user_suspended_status(self, user_id: str, suspended: bool) -> None:
+        """
+        Set whether the user's account is suspended in the `users` table.
+
+        Args:
+            user_id: The user ID of the user in question
+            suspended: True if the user is suspended, false if not
+        """
+        await self.db_pool.runInteraction(
+            "set_user_suspended_status",
+            self.set_user_suspended_status_txn,
+            user_id,
+            suspended,
+        )
+
+    def set_user_suspended_status_txn(
+        self, txn: LoggingTransaction, user_id: str, suspended: bool
+    ) -> None:
+        self.db_pool.simple_update_one_txn(
+            txn=txn,
+            table="users",
+            keyvalues={"name": user_id},
+            updatevalues={"suspended": suspended},
+        )
+        self._invalidate_cache_and_stream(
+            txn, self.get_user_suspended_status, (user_id,)
+        )
+        self._invalidate_cache_and_stream(txn, self.get_user_by_id, (user_id,))
+
+    async def set_user_locked_status(self, user_id: str, locked: bool) -> None:
+        """Set the `locked` property for the provided user to the provided value.
+
+        Args:
+            user_id: The ID of the user to set the status for.
+            locked: The value to set for `locked`.
+        """
+
+        await self.db_pool.runInteraction(
+            "set_user_locked_status",
+            self.set_user_locked_status_txn,
+            user_id,
+            locked,
+        )
+
+    def set_user_locked_status_txn(
+        self, txn: LoggingTransaction, user_id: str, locked: bool
+    ) -> None:
+        self.db_pool.simple_update_one_txn(
+            txn=txn,
+            table="users",
+            keyvalues={"name": user_id},
+            updatevalues={"locked": locked},
+        )
+        self._invalidate_cache_and_stream(txn, self.get_user_locked_status, (user_id,))
+        self._invalidate_cache_and_stream(txn, self.get_user_by_id, (user_id,))
 
     def update_user_approval_status_txn(
         self, txn: LoggingTransaction, user_id: str, approved: bool
@@ -2265,6 +2434,26 @@ class RegistrationStore(StatsStore, RegistrationBackgroundUpdateStore):
         )
 
         return next_id
+
+    async def set_device_for_refresh_token(
+        self, user_id: str, old_device_id: str, device_id: str
+    ) -> None:
+        """Moves refresh tokens from old device to current device
+
+        Args:
+            user_id: The user of the devices.
+            old_device_id: The old device.
+            device_id: The new device ID.
+        Returns:
+            None
+        """
+
+        await self.db_pool.simple_update(
+            "refresh_tokens",
+            keyvalues={"user_id": user_id, "device_id": old_device_id},
+            updatevalues={"device_id": device_id},
+            desc="set_device_for_refresh_token",
+        )
 
     def _set_device_for_access_token_txn(
         self, txn: LoggingTransaction, token: str, device_id: str
@@ -2427,8 +2616,8 @@ class RegistrationStore(StatsStore, RegistrationBackgroundUpdateStore):
             # *obviously* the 'profiles' table uses localpart for user_id
             # while everything else uses the full mxid.
             txn.execute(
-                "INSERT INTO profiles(user_id, displayname) VALUES (?,?)",
-                (user_id_obj.localpart, create_profile_with_displayname),
+                "INSERT INTO profiles(full_user_id, user_id, displayname) VALUES (?,?,?)",
+                (user_id, user_id_obj.localpart, create_profile_with_displayname),
             )
 
         if self.hs.config.stats.stats_enabled:
@@ -2559,10 +2748,11 @@ class RegistrationStore(StatsStore, RegistrationBackgroundUpdateStore):
             )
             tokens_and_devices = [(r[0], r[1], r[2]) for r in txn]
 
-            for token, _, _ in tokens_and_devices:
-                self._invalidate_cache_and_stream(
-                    txn, self.get_user_by_access_token, (token,)
-                )
+            self._invalidate_cache_and_stream_bulk(
+                txn,
+                self.get_user_by_access_token,
+                [(token,) for token, _, _ in tokens_and_devices],
+            )
 
             txn.execute("DELETE FROM access_tokens WHERE %s" % where_clause, values)
 
@@ -2647,12 +2837,11 @@ class RegistrationStore(StatsStore, RegistrationBackgroundUpdateStore):
                     # reason, the next check is on the client secret, which is NOT NULL,
                     # so we don't have to worry about the client secret matching by
                     # accident.
-                    row = {"client_secret": None, "validated_at": None}
+                    row = None, None
                 else:
                     raise ThreepidValidationError("Unknown session_id")
 
-            retrieved_client_secret = row["client_secret"]
-            validated_at = row["validated_at"]
+            retrieved_client_secret, validated_at = row
 
             row = self.db_pool.simple_select_one_txn(
                 txn,
@@ -2666,8 +2855,7 @@ class RegistrationStore(StatsStore, RegistrationBackgroundUpdateStore):
                 raise ThreepidValidationError(
                     "Validation token not found or has expired"
                 )
-            expires = row["expires"]
-            next_link = row["next_link"]
+            expires, next_link = row
 
             if retrieved_client_secret != client_secret:
                 raise ThreepidValidationError(

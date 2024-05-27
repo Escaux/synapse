@@ -1,22 +1,28 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from typing import TYPE_CHECKING
 
 import attr
 
-from synapse.replication.tcp.streams import Stream
-from synapse.replication.tcp.streams._base import current_token_without_instance
+from synapse.replication.tcp.streams._base import _StreamFromIdGen
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -28,7 +34,7 @@ class UnPartialStatedRoomStreamRow:
     room_id: str
 
 
-class UnPartialStatedRoomStream(Stream):
+class UnPartialStatedRoomStream(_StreamFromIdGen):
     """
     Stream to notify about rooms becoming un-partial-stated;
     that is, when the background sync finishes such that we now have full state for
@@ -42,9 +48,8 @@ class UnPartialStatedRoomStream(Stream):
         store = hs.get_datastores().main
         super().__init__(
             hs.get_instance_name(),
-            # TODO(faster_joins, multiple writers): we need to account for instance names
-            current_token_without_instance(store.get_un_partial_stated_rooms_token),
             store.get_un_partial_stated_rooms_from_stream,
+            store._un_partial_stated_rooms_stream_id_gen,
         )
 
 
@@ -58,7 +63,7 @@ class UnPartialStatedEventStreamRow:
     rejection_status_changed: bool
 
 
-class UnPartialStatedEventStream(Stream):
+class UnPartialStatedEventStream(_StreamFromIdGen):
     """
     Stream to notify about events becoming un-partial-stated.
     """
@@ -70,7 +75,6 @@ class UnPartialStatedEventStream(Stream):
         store = hs.get_datastores().main
         super().__init__(
             hs.get_instance_name(),
-            # TODO(faster_joins, multiple writers): we need to account for instance names
-            current_token_without_instance(store.get_un_partial_stated_events_token),
             store.get_un_partial_stated_events_from_stream,
+            store._un_partial_stated_events_stream_id_gen,
         )

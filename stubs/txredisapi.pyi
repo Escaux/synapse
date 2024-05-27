@@ -1,4 +1,5 @@
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -61,6 +62,9 @@ def lazyConnection(
 # most methods to it via ConnectionHandler.__getattr__.
 class ConnectionHandler(RedisProtocol):
     def disconnect(self) -> "Deferred[None]": ...
+    def __repr__(self) -> str: ...
+
+class UnixConnectionHandler(ConnectionHandler): ...
 
 class RedisFactory(protocol.ReconnectingClientFactory):
     continueTrying: bool

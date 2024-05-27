@@ -1,21 +1,40 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2018-2019 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import atexit
 import os
-from typing import Any, Callable, Dict, List, Tuple, Union, overload
+import signal
+from types import FrameType, TracebackType
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    overload,
+)
 
 import attr
 from typing_extensions import Literal, ParamSpec
@@ -29,6 +48,13 @@ from synapse.server import HomeServer
 from synapse.storage.database import LoggingDatabaseConnection
 from synapse.storage.engines import create_engine
 from synapse.storage.prepare_database import prepare_database
+
+try:
+    import authlib  # noqa: F401
+
+    HAS_AUTHLIB = True
+except ImportError:
+    HAS_AUTHLIB = False
 
 # set this to True to run the tests against postgres instead of sqlite.
 #
@@ -80,7 +106,7 @@ def setupdb() -> None:
 
         # Set up in the db
         db_conn = db_engine.module.connect(
-            database=POSTGRES_BASE_DB,
+            dbname=POSTGRES_BASE_DB,
             user=POSTGRES_USER,
             host=POSTGRES_HOST,
             port=POSTGRES_PORT,
@@ -108,13 +134,11 @@ def setupdb() -> None:
 
 
 @overload
-def default_config(name: str, parse: Literal[False] = ...) -> Dict[str, object]:
-    ...
+def default_config(name: str, parse: Literal[False] = ...) -> Dict[str, object]: ...
 
 
 @overload
-def default_config(name: str, parse: Literal[True]) -> HomeServerConfig:
-    ...
+def default_config(name: str, parse: Literal[True]) -> HomeServerConfig: ...
 
 
 def default_config(
@@ -131,6 +155,9 @@ def default_config(
         # the test signing key is just an arbitrary ed25519 key to keep the config
         # parser happy
         "signing_key": "ed25519 a_lPym qvioDNmfExFBRPgdTU+wtFYKq4JfwFRv7sYVgWvmgJg",
+        # Disable trusted key servers, otherwise unit tests might try to actually
+        # reach out to matrix.org.
+        "trusted_key_servers": [],
         "event_cache_size": 1,
         "enable_registration": True,
         "enable_registration_captcha": False,
@@ -335,6 +362,60 @@ async def create_room(hs: HomeServer, room_id: str, creator_id: str) -> None:
         },
     )
 
-    event, context = await event_creation_handler.create_new_client_event(builder)
+    event, unpersisted_context = await event_creation_handler.create_new_client_event(
+        builder
+    )
+    context = await unpersisted_context.persist(event)
 
     await persistence_store.persist_event(event, context)
+
+
+T = TypeVar("T")
+
+
+def checked_cast(type: Type[T], x: object) -> T:
+    """A version of typing.cast that is checked at runtime.
+
+    We have our own function for this for two reasons:
+
+    1. typing.cast itself is deliberately a no-op at runtime, see
+       https://docs.python.org/3/library/typing.html#typing.cast
+    2. To help workaround a mypy-zope bug https://github.com/Shoobx/mypy-zope/issues/91
+       where mypy would erroneously consider `isinstance(x, type)` to be false in all
+       circumstances.
+
+    For this to make sense, `T` needs to be something that `isinstance` can check; see
+        https://docs.python.org/3/library/functions.html?highlight=isinstance#isinstance
+        https://docs.python.org/3/glossary.html#term-abstract-base-class
+        https://docs.python.org/3/library/typing.html#typing.runtime_checkable
+    for more details.
+    """
+    assert isinstance(x, type)
+    return x
+
+
+class TestTimeout(Exception):
+    pass
+
+
+class test_timeout:
+    def __init__(self, seconds: int, error_message: Optional[str] = None) -> None:
+        if error_message is None:
+            error_message = "test timed out after {}s.".format(seconds)
+        self.seconds = seconds
+        self.error_message = error_message
+
+    def handle_timeout(self, signum: int, frame: Optional[FrameType]) -> None:
+        raise TestTimeout(self.error_message)
+
+    def __enter__(self) -> None:
+        signal.signal(signal.SIGALRM, self.handle_timeout)
+        signal.alarm(self.seconds)
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
+        signal.alarm(0)

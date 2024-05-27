@@ -54,7 +54,8 @@ It returns a JSON body like the following:
             "external_id": "<user_id_provider_2>"
         }
     ],
-    "user_type": null
+    "user_type": null,
+    "locked": false
 }
 ```
 
@@ -62,7 +63,7 @@ URL parameters:
 
 - `user_id`: fully-qualified user id: for example, `@user:server.com`.
 
-## Create or modify Account
+## Create or modify account
 
 This API allows an administrator to create or modify a user account with a
 specific `user_id`.
@@ -78,31 +79,33 @@ with a body of:
 ```json
 {
     "password": "user_password",
-    "displayname": "User",
+    "logout_devices": false,
+    "displayname": "Alice Marigold",
+    "avatar_url": "mxc://example.com/abcde12345",
     "threepids": [
         {
             "medium": "email",
-            "address": "<user_mail_1>"
+            "address": "alice@example.com"
         },
         {
             "medium": "email",
-            "address": "<user_mail_2>"
+            "address": "alice@domain.org"
         }
     ],
     "external_ids": [
         {
-            "auth_provider": "<provider1>",
-            "external_id": "<user_id_provider_1>"
+            "auth_provider": "example",
+            "external_id": "12345"
         },
         {
-            "auth_provider": "<provider2>",
-            "external_id": "<user_id_provider_2>"
+            "auth_provider": "example2",
+            "external_id": "abc54321"
         }
     ],
-    "avatar_url": "<avatar_url>",
     "admin": false,
     "deactivated": false,
-    "user_type": null
+    "user_type": null,
+    "locked": false
 }
 ```
 
@@ -112,43 +115,56 @@ Returns HTTP status code:
 
 URL parameters:
 
-- `user_id`: fully-qualified user id: for example, `@user:server.com`.
+- `user_id` - A fully-qualified user id. For example, `@user:server.com`.
 
 Body parameters:
 
-- `password` - string, optional. If provided, the user's password is updated and all
+- `password` - **string**, optional. If provided, the user's password is updated and all
   devices are logged out, unless `logout_devices` is set to `false`.
-- `logout_devices` - bool, optional, defaults to `true`. If set to false, devices aren't
+- `logout_devices` - **bool**, optional, defaults to `true`. If set to `false`, devices aren't
   logged out even when `password` is provided.
-- `displayname` - string, optional, defaults to the value of `user_id`.
-- `threepids` - array, optional, allows setting the third-party IDs (email, msisdn)
-  - `medium` - string. Kind of third-party ID, either `email` or `msisdn`.
-  - `address` - string. Value of third-party ID.
-  belonging to a user.
-- `external_ids` - array, optional. Allow setting the identifier of the external identity
-  provider for SSO (Single sign-on). Details in the configuration manual under the
-  sections [sso](../usage/configuration/config_documentation.md#sso) and [oidc_providers](../usage/configuration/config_documentation.md#oidc_providers).
-  - `auth_provider` - string. ID of the external identity provider. Value of `idp_id`
-    in the homeserver configuration. Note that no error is raised if the provided
-    value is not in the homeserver configuration.
-  - `external_id` - string, user ID in the external identity provider.
-- `avatar_url` - string, optional, must be a
+- `displayname` - **string**, optional. If set to an empty string (`""`), the user's display name
+  will be removed.
+- `avatar_url` - **string**, optional. Must be a
   [MXC URI](https://matrix.org/docs/spec/client_server/r0.6.0#matrix-content-mxc-uris).
-- `admin` - bool, optional, defaults to `false`.
-- `deactivated` - bool, optional. If unspecified, deactivation state will be left
-  unchanged on existing accounts and set to `false` for new accounts.
-  A user cannot be erased by deactivating with this API. For details on
-  deactivating users see [Deactivate Account](#deactivate-account).
-- `user_type` - string or null, optional. If provided, the user type will be
-  adjusted. If `null` given, the user type will be cleared. Other 
-  allowed options are: `bot` and `support`.
+  If set to an empty string (`""`), the user's avatar is removed.
+- `threepids` - **array**, optional. If provided, the user's third-party IDs (email, msisdn) are
+  entirely replaced with the given list. Each item in the array is an object with the following
+  fields:
+  - `medium` - **string**, required. The type of third-party ID, either `email` or `msisdn` (phone number).
+  - `address` - **string**, required. The third-party ID itself, e.g. `alice@example.com` for `email` or
+    `447470274584` (for a phone number with country code "44") and `19254857364` (for a phone number
+    with country code "1") for `msisdn`.
+  Note: If a threepid is removed from a user via this option, Synapse will also attempt to remove
+  that threepid from any identity servers it is aware has a binding for it.
+- `external_ids` - **array**, optional. Allow setting the identifier of the external identity
+  provider for SSO (Single sign-on). More details are in the configuration manual under the
+  sections [sso](../usage/configuration/config_documentation.md#sso) and [oidc_providers](../usage/configuration/config_documentation.md#oidc_providers).
+  - `auth_provider` - **string**, required. The unique, internal ID of the external identity provider.
+    The same as `idp_id` from the homeserver configuration. Note that no error is raised if the
+    provided value is not in the homeserver configuration.
+  - `external_id` - **string**, required. An identifier for the user in the external identity provider.
+    When the user logs in to the identity provider, this must be the unique ID that they map to.
+- `admin` - **bool**, optional, defaults to `false`. Whether the user is a homeserver administrator,
+  granting them access to the Admin API, among other things.
+- `deactivated` - **bool**, optional. If unspecified, deactivation state will be left unchanged.
 
-If the user already exists then optional parameters default to the current value.
+  Note:
+  - For the password field there is no strict check of the necessity for its presence.
+    It is possible to have active users without a password, e.g. when authenticating with OIDC is configured.
+    You must check yourself whether a password is required when reactivating a user or not.
+  - It is not possible to set a password if the config option `password_config.localdb_enabled` is set `false`.
+  Users' passwords are wiped upon account deactivation, hence the need to set a new one here.
 
-In order to re-activate an account `deactivated` must be set to `false`. If
-users do not login via single-sign-on, a new `password` must be provided.
+  Note: a user cannot be erased with this API. For more details on
+  deactivating and erasing users see [Deactivate Account](#deactivate-account).
+- `locked` - **bool**, optional. If unspecified, locked state will be left unchanged.
+- `user_type` - **string** or null, optional. If not provided, the user type will be
+  not be changed. If `null` is given, the user type will be cleared.
+  Other allowed options are: `bot` and `support`.
 
 ## List Accounts
+### List Accounts (V2)
 
 This API returns all local user accounts.
 By default, the response is ordered by ascending user ID.
@@ -172,7 +188,8 @@ A response body like the following is returned:
             "shadow_banned": 0,
             "displayname": "<User One>",
             "avatar_url": null,
-            "creation_ts": 1560432668000
+            "creation_ts": 1560432668000,
+            "locked": false
         }, {
             "name": "<user_id2>",
             "is_guest": 0,
@@ -183,7 +200,8 @@ A response body like the following is returned:
             "shadow_banned": 0,
             "displayname": "<User Two>",
             "avatar_url": "<avatar_url>",
-            "creation_ts": 1561550621000
+            "creation_ts": 1561550621000,
+            "locked": false
         }
     ],
     "next_token": "100",
@@ -206,7 +224,9 @@ The following parameters should be set in the URL:
 - `name` - Is optional and filters to only return users with user ID localparts
   **or** displaynames that contain this value.
 - `guests` - string representing a bool - Is optional and if `false` will **exclude** guest users.
-  Defaults to `true` to include guest users.
+  Defaults to `true` to include guest users. This parameter is not supported when MSC3861 is enabled. [See #15582](https://github.com/matrix-org/synapse/pull/15582)
+- `admins` - Optional flag to filter admins. If `true`, only admins are queried. If `false`, admins are excluded from
+  the query. When the flag is absent (the default), **both** admins and non-admins are included in the search results.
 - `deactivated` - string representing a bool - Is optional and if `true` will **include** deactivated users.
   Defaults to `false` to exclude deactivated users.
 - `limit` - string representing a positive integer - Is optional but is used for pagination,
@@ -228,9 +248,15 @@ The following parameters should be set in the URL:
   - `displayname` - Users are ordered alphabetically by `displayname`.
   - `avatar_url` - Users are ordered alphabetically by avatar URL.
   - `creation_ts` - Users are ordered by when the users was created in ms.
+  - `last_seen_ts` - Users are ordered by when the user was lastly seen in ms.
 
 - `dir` - Direction of media order. Either `f` for forwards or `b` for backwards.
   Setting this value to `b` will reverse the above sort order. Defaults to `f`.
+- `not_user_type` - Exclude certain user types, such as bot users, from the request.
+   Can be provided multiple times. Possible values are `bot`, `support` or "empty string".
+   "empty string" here means to exclude users without a type.
+- `locked` - string representing a bool - Is optional and if `true` will **include** locked users.
+  Defaults to `false` to exclude locked users. Note: Introduced in v1.93.
 
 Caution. The database only has indexes on the columns `name` and `creation_ts`.
 This means that if a different sort order is used (`is_guest`, `admin`,
@@ -248,17 +274,32 @@ The following fields are returned in the JSON response body:
   - `is_guest` - bool - Status if that user is a guest account.
   - `admin` - bool - Status if that user is a server administrator.
   - `user_type` - string - Type of the user. Normal users are type `None`.
-    This allows user type specific behaviour. There are also types `support` and `bot`. 
+    This allows user type specific behaviour. There are also types `support` and `bot`.
   - `deactivated` - bool - Status if that user has been marked as deactivated.
   - `erased` - bool - Status if that user has been marked as erased.
   - `shadow_banned` - bool - Status if that user has been marked as shadow banned.
   - `displayname` - string - The user's display name if they have set one.
   - `avatar_url` - string -  The user's avatar URL if they have set one.
   - `creation_ts` - integer - The user's creation timestamp in ms.
-
+  - `last_seen_ts` - integer - The user's last activity timestamp in ms.
+  - `locked` - bool - Status if that user has been marked as locked. Note: Introduced in v1.93.
 - `next_token`: string representing a positive integer - Indication for pagination. See above.
 - `total` - integer - Total number of media.
 
+*Added in Synapse 1.93:* the `locked` query parameter and response field.
+
+### List Accounts (V3)
+
+This API returns all local user accounts (see v2). In contrast to v2, the query parameter `deactivated` is handled differently.
+
+```
+GET /_synapse/admin/v3/users
+```
+
+**Parameters**
+- `deactivated` - Optional flag to filter deactivated users. If `true`, only deactivated users are returned.
+  If `false`, deactivated users are excluded from the query. When the flag is absent (the default),
+  users are not filtered by deactivation status.
 
 ## Query current sessions for a user
 
@@ -373,6 +414,8 @@ The following actions are **NOT** performed. The list may be incomplete.
 
 ## Reset password
 
+**Note:** This API is disabled when MSC3861 is enabled. [See #15582](https://github.com/matrix-org/synapse/pull/15582)
+
 Changes the password of another user. This will automatically log the user out of all their devices.
 
 The api is:
@@ -396,6 +439,8 @@ The parameter `logout_devices` is optional and defaults to `true`.
 
 ## Get whether a user is a server administrator or not
 
+**Note:** This API is disabled when MSC3861 is enabled. [See #15582](https://github.com/matrix-org/synapse/pull/15582)
+
 The api is:
 
 ```
@@ -412,6 +457,8 @@ A response body like the following is returned:
 
 
 ## Change whether a user is a server administrator or not
+
+**Note:** This API is disabled when MSC3861 is enabled. [See #15582](https://github.com/matrix-org/synapse/pull/15582)
 
 Note that you cannot demote yourself.
 
@@ -586,6 +633,16 @@ A response body like the following is returned:
       "quarantined_by": null,
       "safe_from_quarantine": false,
       "upload_name": "test2.png"
+    },
+    {
+      "created_ts": 300400,
+      "last_access_ts": 300700,
+      "media_id": "BzYNLRUgGHphBkdKGbzXwbjX",
+      "media_length": 1337,
+      "media_type": "application/octet-stream",
+      "quarantined_by": null,
+      "safe_from_quarantine": false,
+      "upload_name": null
     }
   ],
   "next_token": 3,
@@ -647,16 +704,17 @@ The following fields are returned in the JSON response body:
 - `media` - An array of objects, each containing information about a media.
   Media objects contain the following fields:
   - `created_ts` - integer - Timestamp when the content was uploaded in ms.
-  - `last_access_ts` - integer - Timestamp when the content was last accessed in ms.
+  - `last_access_ts` - integer or null - Timestamp when the content was last accessed in ms.
+     Null if there was no access, yet.
   - `media_id` - string - The id used to refer to the media. Details about the format
     are documented under
     [media repository](../media_repository.md).
   - `media_length` - integer - Length of the media in bytes.
   - `media_type` - string - The MIME-type of the media.
-  - `quarantined_by` - string - The user ID that initiated the quarantine request
-    for this media.
+  - `quarantined_by` - string or null - The user ID that initiated the quarantine request
+    for this media. Null if not quarantined.
   - `safe_from_quarantine` - bool - Status if this media is safe from quarantining.
-  - `upload_name` - string - The name the media was uploaded with.
+  - `upload_name` - string or null - The name the media was uploaded with. Null if not provided during upload.
 - `next_token`: integer - Indication for pagination. See above.
 - `total` - integer - Total number of media.
 
@@ -706,6 +764,8 @@ delete largest/smallest or newest/oldest files first.
 
 ## Login as a user
 
+**Note:** This API is disabled when MSC3861 is enabled. [See #15582](https://github.com/matrix-org/synapse/pull/15582)
+
 Get an access token that can be used to authenticate as that user. Useful for
 when admins wish to do actions on behalf of a user.
 
@@ -718,7 +778,8 @@ POST /_synapse/admin/v1/users/<user_id>/login
 
 An optional `valid_until_ms` field can be specified in the request body as an
 integer timestamp that specifies when the token should expire. By default tokens
-do not expire.
+do not expire. Note that this API does not allow a user to login as themselves
+(to create more tokens).
 
 A response body like the following is returned:
 
@@ -738,6 +799,43 @@ Note: The token will expire if the *admin* user calls `/logout/all` from any
 of their devices, but the token will *not* expire if the target user does the
 same.
 
+## Allow replacing master cross-signing key without User-Interactive Auth
+
+This endpoint is not intended for server administrator usage;
+we describe it here for completeness.
+
+This API temporarily permits a user to replace their master cross-signing key
+without going through
+[user-interactive authentication](https://spec.matrix.org/v1.8/client-server-api/#user-interactive-authentication-api) (UIA).
+This is useful when Synapse has delegated its authentication to the
+[Matrix Authentication Service](https://github.com/matrix-org/matrix-authentication-service/);
+as Synapse cannot perform UIA is not possible in these circumstances.
+
+The API is
+
+```http request
+POST /_synapse/admin/v1/users/<user_id>/_allow_cross_signing_replacement_without_uia
+{}
+```
+
+If the user does not exist, or does exist but has no master cross-signing key,
+this will return with status code `404 Not Found`.
+
+Otherwise, a response body like the following is returned, with status `200 OK`:
+
+```json
+{
+    "updatable_without_uia_before_ms": 1234567890
+}
+```
+
+The response body is a JSON object with a single field:
+
+- `updatable_without_uia_before_ms`: integer. The timestamp in milliseconds
+  before which the user is permitted to replace their cross-signing key without
+  going through UIA.
+
+_Added in Synapse 1.97.0._
 
 ## User devices
 
@@ -801,6 +899,33 @@ The following fields are returned in the JSON response body:
   - `user_id` - Owner of  device.
 
 - `total` - Total number of user's devices.
+
+### Create a device
+
+Creates a new device for a specific `user_id` and `device_id`. Does nothing if the `device_id`
+exists already.
+
+The API is:
+
+```
+POST /_synapse/admin/v2/users/<user_id>/devices
+
+{
+  "device_id": "QBUAZIFURK"
+}
+```
+
+An empty JSON dict is returned.
+
+**Parameters**
+
+The following parameters should be set in the URL:
+
+- `user_id` - fully qualified: for example, `@user:server.com`.
+
+The following fields are required in the JSON request body:
+
+- `device_id` - The device ID to create.
 
 ### Delete multiple devices
 Deletes the given devices for a specific `user_id`, and invalidates
@@ -1142,13 +1267,13 @@ The following parameters should be set in the URL:
 - `user_id` - The fully qualified MXID: for example, `@user:server.com`. The user must
   be local.
 
-### Check username availability
+## Check username availability
 
-Checks to see if a username is available, and valid, for the server. See [the client-server 
+Checks to see if a username is available, and valid, for the server. See [the client-server
 API](https://matrix.org/docs/spec/client_server/r0.6.0#get-matrix-client-r0-register-available)
 for more information.
 
-This endpoint will work even if registration is disabled on the server, unlike 
+This endpoint will work even if registration is disabled on the server, unlike
 `/_matrix/client/r0/register/available`.
 
 The API is:
@@ -1160,7 +1285,7 @@ GET /_synapse/admin/v1/username_available?username=$localpart
 The request and response format is the same as the
 [/_matrix/client/r0/register/available](https://matrix.org/docs/spec/client_server/r0.6.0#get-matrix-client-r0-register-available) API.
 
-### Find a user based on their ID in an auth provider
+## Find a user based on their ID in an auth provider
 
 The API is:
 
@@ -1199,7 +1324,7 @@ Returns a `404` HTTP status code if no user was found, with a response body like
 _Added in Synapse 1.68.0._
 
 
-### Find a user based on their Third Party ID (ThreePID or 3PID)
+## Find a user based on their Third Party ID (ThreePID or 3PID)
 
 The API is:
 

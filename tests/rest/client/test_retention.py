@@ -1,16 +1,22 @@
-# Copyright 2019 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from typing import Any, Dict
 from unittest.mock import Mock
 
@@ -136,6 +142,7 @@ class RetentionTestCase(unittest.HomeserverTestCase):
         # Send a first event, which should be filtered out at the end of the test.
         resp = self.helper.send(room_id=room_id, body="1", tok=self.token)
         first_event_id = resp.get("event_id")
+        assert isinstance(first_event_id, str)
 
         # Advance the time by 2 days. We're using the default retention policy, therefore
         # after this the first event will still be valid.
@@ -144,6 +151,7 @@ class RetentionTestCase(unittest.HomeserverTestCase):
         # Send another event, which shouldn't get filtered out.
         resp = self.helper.send(room_id=room_id, body="2", tok=self.token)
         valid_event_id = resp.get("event_id")
+        assert isinstance(valid_event_id, str)
 
         # Advance the time by another 2 days. After this, the first event should be
         # outdated but not the second one.
@@ -155,7 +163,12 @@ class RetentionTestCase(unittest.HomeserverTestCase):
         )
         self.assertEqual(2, len(events), "events retrieved from database")
         filtered_events = self.get_success(
-            filter_events_for_client(storage_controllers, self.user_id, events)
+            filter_events_for_client(
+                storage_controllers,
+                self.user_id,
+                events,
+                msc4115_membership_on_events=True,
+            )
         )
 
         # We should only get one event back.
@@ -229,7 +242,7 @@ class RetentionTestCase(unittest.HomeserverTestCase):
 
         # Check that we can still access state events that were sent before the event that
         # has been purged.
-        self.get_event(room_id, create_event.event_id)
+        self.get_event(room_id, bool(create_event))
 
     def get_event(self, event_id: str, expect_none: bool = False) -> JsonDict:
         event = self.get_success(self.store.get_event(event_id, allow_none=True))
@@ -238,10 +251,10 @@ class RetentionTestCase(unittest.HomeserverTestCase):
             self.assertIsNone(event)
             return {}
 
-        self.assertIsNotNone(event)
+        assert event is not None
 
         time_now = self.clock.time_msec()
-        serialized = self.serializer.serialize_event(event, time_now)
+        serialized = self.get_success(self.serializer.serialize_event(event, time_now))
 
         return serialized
 

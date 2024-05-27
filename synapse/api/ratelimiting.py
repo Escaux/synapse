@@ -1,17 +1,24 @@
-# Copyright 2014-2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from collections import OrderedDict
 from typing import Hashable, Optional, Tuple
@@ -40,7 +47,7 @@ class Ratelimiter:
     - the cost C of this request in tokens.
     Then, if there is room in the bucket for C tokens (T + C <= `burst_count`),
     the request is permitted and `cost` tokens are added to the bucket.
-    Otherwise the request is denied, and the bucket continues to hold T tokens.
+    Otherwise, the request is denied, and the bucket continues to hold T tokens.
 
     This means that the limiter enforces an average request frequency of `rate_hz`,
     while accumulating a buffer of up to `burst_count` requests which can be consumed
@@ -55,18 +62,23 @@ class Ratelimiter:
     request.
 
     Args:
+        store: The datastore providing get_ratelimit_for_user.
         clock: A homeserver clock, for retrieving the current time
-        rate_hz: The long term number of actions that can be performed in a second.
-        burst_count: How many actions that can be performed before being limited.
+        cfg: The ratelimit configuration for this rate limiter including the
+            allowed rate and burst count.
     """
 
     def __init__(
-        self, store: DataStore, clock: Clock, rate_hz: float, burst_count: int
+        self,
+        store: DataStore,
+        clock: Clock,
+        cfg: RatelimitSettings,
     ):
         self.clock = clock
-        self.rate_hz = rate_hz
-        self.burst_count = burst_count
+        self.rate_hz = cfg.per_second
+        self.burst_count = cfg.burst_count
         self.store = store
+        self._limiter_name = cfg.key
 
         # An ordered dictionary representing the token buckets tracked by this rate
         # limiter. Each entry maps a key of arbitrary type to a tuple representing:
@@ -305,7 +317,8 @@ class Ratelimiter:
 
         if not allowed:
             raise LimitExceededError(
-                retry_after_ms=int(1000 * (time_allowed - time_now_s))
+                limiter_name=self._limiter_name,
+                retry_after_ms=int(1000 * (time_allowed - time_now_s)),
             )
 
 
@@ -322,7 +335,9 @@ class RequestRatelimiter:
 
         # The rate_hz and burst_count are overridden on a per-user basis
         self.request_ratelimiter = Ratelimiter(
-            store=self.store, clock=self.clock, rate_hz=0, burst_count=0
+            store=self.store,
+            clock=self.clock,
+            cfg=RatelimitSettings(key=rc_message.key, per_second=0, burst_count=0),
         )
         self._rc_message = rc_message
 
@@ -332,8 +347,7 @@ class RequestRatelimiter:
             self.admin_redaction_ratelimiter: Optional[Ratelimiter] = Ratelimiter(
                 store=self.store,
                 clock=self.clock,
-                rate_hz=rc_admin_redaction.per_second,
-                burst_count=rc_admin_redaction.burst_count,
+                cfg=rc_admin_redaction,
             )
         else:
             self.admin_redaction_ratelimiter = None

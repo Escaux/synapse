@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, List, Tuple
@@ -21,7 +28,6 @@ from synapse.api.room_versions import KNOWN_ROOM_VERSIONS
 from synapse.events import EventBase, make_event_from_dict
 from synapse.events.snapshot import EventContext
 from synapse.http.server import HttpServer
-from synapse.http.servlet import parse_json_object_from_request
 from synapse.replication.http._base import ReplicationEndpoint
 from synapse.types import JsonDict, Requester, UserID
 from synapse.util.metrics import Measure
@@ -114,12 +120,12 @@ class ReplicationSendEventsRestServlet(ReplicationEndpoint):
         return payload
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request
+        self, request: Request, payload: JsonDict
     ) -> Tuple[int, JsonDict]:
         with Measure(self.clock, "repl_send_events_parse"):
-            payload = parse_json_object_from_request(request)
             events_and_context = []
             events = payload["events"]
+            rooms = set()
 
             for event_payload in events:
                 event_dict = event_payload["event"]
@@ -146,11 +152,13 @@ class ReplicationSendEventsRestServlet(ReplicationEndpoint):
                     UserID.from_string(u) for u in event_payload["extra_users"]
                 ]
 
-                logger.info(
-                    "Got batch of events to send, last ID of batch is: %s, sending into room: %s",
-                    event.event_id,
-                    event.room_id,
-                )
+                # all the rooms *should* be the same, but we'll log separately to be
+                # sure.
+                rooms.add(event.room_id)
+
+            logger.info(
+                "Got batch of %i events to persist to rooms %s", len(events), rooms
+            )
 
             last_event = (
                 await self.event_creation_handler.persist_and_notify_client_events(

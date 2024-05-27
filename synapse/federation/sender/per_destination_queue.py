@@ -1,18 +1,24 @@
-# Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2019 New Vector Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import datetime
 import logging
 from types import TracebackType
@@ -57,6 +63,10 @@ sent_edus_by_type = Counter(
     "Number of sent EDUs successfully sent, by event type",
     ["type"],
 )
+
+
+# If the retry interval is larger than this then we enter "catchup" mode
+CATCHUP_RETRY_INTERVAL = 60 * 60 * 1000
 
 
 class PerDestinationQueue:
@@ -370,7 +380,7 @@ class PerDestinationQueue:
                 ),
             )
 
-            if e.retry_interval > 60 * 60 * 1000:
+            if e.retry_interval > CATCHUP_RETRY_INTERVAL:
                 # we won't retry for another hour!
                 # (this suggests a significant outage)
                 # We drop pending EDUs because otherwise they will
@@ -497,8 +507,8 @@ class PerDestinationQueue:
             #
             # Note: `catchup_pdus` will have exactly one PDU per room.
             for pdu in catchup_pdus:
-                # The PDU from the DB will be the last PDU in the room from
-                # *this server* that wasn't sent to the remote. However, other
+                # The PDU from the DB will be the newest PDU in the room from
+                # *this server* that we tried---but were unable---to send to the remote.
                 # servers may have sent lots of events since then, and we want
                 # to try and tell the remote only about the *latest* events in
                 # the room. This is so that it doesn't get inundated by events
@@ -515,6 +525,11 @@ class PerDestinationQueue:
                 if pdu.event_id in extrems:
                     # If the event is in the extremities, then great! We can just
                     # use that without having to do further checks.
+                    room_catchup_pdus = [pdu]
+                elif await self._store.is_partial_state_room(pdu.room_id):
+                    # We can't be sure which events the destination should
+                    # see using only partial state. Avoid doing so, and just retry
+                    # sending our the newest PDU the remote is missing from us.
                     room_catchup_pdus = [pdu]
                 else:
                     # If not, fetch the extremities and figure out which we can
@@ -547,6 +562,8 @@ class PerDestinationQueue:
                         self._server_name,
                         new_pdus,
                         redact=False,
+                        filter_out_erased_senders=True,
+                        filter_out_remote_partial_state_events=True,
                     )
 
                     # If we've filtered out all the extremities, fall back to

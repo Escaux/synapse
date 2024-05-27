@@ -1,20 +1,28 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import sys
-from argparse import REMAINDER
+from argparse import REMAINDER, Namespace
 from contextlib import redirect_stderr
 from io import StringIO
+from typing import Any, Callable, Coroutine, List, TypeVar
 
 import pyperf
 
@@ -22,46 +30,50 @@ from twisted.internet.defer import Deferred, ensureDeferred
 from twisted.logger import globalLogBeginner, textFileLogObserver
 from twisted.python.failure import Failure
 
+from synapse.types import ISynapseReactor
 from synmark import make_reactor
 from synmark.suites import SUITES
 
 from tests.utils import setupdb
 
+T = TypeVar("T")
 
-def make_test(main):
+
+def make_test(
+    main: Callable[[ISynapseReactor, int], Coroutine[Any, Any, float]]
+) -> Callable[[int], float]:
     """
     Take a benchmark function and wrap it in a reactor start and stop.
     """
 
-    def _main(loops):
-
+    def _main(loops: int) -> float:
         reactor = make_reactor()
 
         file_out = StringIO()
         with redirect_stderr(file_out):
-
-            d = Deferred()
+            d: "Deferred[float]" = Deferred()
             d.addCallback(lambda _: ensureDeferred(main(reactor, loops)))
 
-            def on_done(_):
-                if isinstance(_, Failure):
-                    _.printTraceback()
+            def on_done(res: T) -> T:
+                if isinstance(res, Failure):
+                    res.printTraceback()
                     print(file_out.getvalue())
                 reactor.stop()
-                return _
+                return res
 
             d.addBoth(on_done)
             reactor.callWhenRunning(lambda: d.callback(True))
             reactor.run()
 
-        return d.result
+        # mypy thinks this is an object for some reason.
+        return d.result  # type: ignore[return-value]
 
     return _main
 
 
 if __name__ == "__main__":
 
-    def add_cmdline_args(cmd, args):
+    def add_cmdline_args(cmd: List[str], args: Namespace) -> None:
         if args.log:
             cmd.extend(["--log"])
         cmd.extend(args.tests)
@@ -84,17 +96,26 @@ if __name__ == "__main__":
         setupdb()
 
     if runner.args.tests:
-        SUITES = list(
-            filter(lambda x: x[0].__name__.split(".")[-1] in runner.args.tests, SUITES)
-        )
+        existing_suites = {s.__name__.split(".")[-1] for s, _ in SUITES}
+        for test in runner.args.tests:
+            if test not in existing_suites:
+                print(f"Test suite {test} does not exist.")
+                exit(-1)
 
-    for suite, loops in SUITES:
+        suites = list(
+            filter(lambda t: t[0].__name__.split(".")[-1] in runner.args.tests, SUITES)
+        )
+    else:
+        suites = SUITES
+
+    for suite, loops in suites:
         if loops:
             runner.args.loops = loops
+            loops_desc = str(loops)
         else:
             runner.args.loops = orig_loops
-            loops = "auto"
+            loops_desc = "auto"
         runner.bench_time_func(
-            suite.__name__ + "_" + str(loops),
+            suite.__name__ + "_" + loops_desc,
             make_test(suite.main),
         )

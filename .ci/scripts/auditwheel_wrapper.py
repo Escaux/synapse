@@ -1,17 +1,23 @@
 #!/usr/bin/env python
-# Copyright 2022 The Matrix.org Foundation C.I.C.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 # Wraps `auditwheel repair` to first check if we're repairing a potentially abi3
 # compatible wheel, if so rename the wheel before repairing it.
@@ -50,7 +56,16 @@ def cpython(wheel_file: str, name: str, version: Version, tag: Tag) -> str:
 
     check_is_abi3_compatible(wheel_file)
 
-    abi3_tag = Tag(tag.interpreter, "abi3", tag.platform)
+    # HACK: it seems that some older versions of pip will consider a wheel marked
+    # as macosx_11_0 as incompatible with Big Sur. I haven't done the full archaeology
+    # here; there are some clues in
+    #     https://github.com/pantsbuild/pants/pull/12857
+    #     https://github.com/pypa/pip/issues/9138
+    #     https://github.com/pypa/packaging/pull/319
+    # Empirically this seems to work, note that macOS 11 and 10.16 are the same,
+    # both versions are valid for backwards compatibility.
+    platform = tag.platform.replace("macosx_11_0", "macosx_10_16")
+    abi3_tag = Tag(tag.interpreter, "abi3", platform)
 
     dirname = os.path.dirname(wheel_file)
     new_wheel_file = os.path.join(

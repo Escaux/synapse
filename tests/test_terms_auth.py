@@ -1,22 +1,31 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from unittest.mock import Mock
 
-from twisted.test.proto_helpers import MemoryReactorClock
+from twisted.internet.interfaces import IReactorTime
+from twisted.test.proto_helpers import MemoryReactor, MemoryReactorClock
 
 from synapse.rest.client.register import register_servlets
+from synapse.server import HomeServer
+from synapse.types import JsonDict
 from synapse.util import Clock
 
 from tests import unittest
@@ -25,7 +34,7 @@ from tests import unittest
 class TermsTestCase(unittest.HomeserverTestCase):
     servlets = [register_servlets]
 
-    def default_config(self):
+    def default_config(self) -> JsonDict:
         config = super().default_config()
         config.update(
             {
@@ -40,17 +49,21 @@ class TermsTestCase(unittest.HomeserverTestCase):
         )
         return config
 
-    def prepare(self, reactor, clock, hs):
-        self.clock = MemoryReactorClock()
+    def prepare(
+        self, reactor: MemoryReactor, clock: Clock, homeserver: HomeServer
+    ) -> None:
+        # type-ignore: mypy-zope doesn't seem to recognise that MemoryReactorClock
+        # implements IReactorTime, via inheritance from twisted.internet.testing.Clock
+        self.clock: IReactorTime = MemoryReactorClock()  # type: ignore[assignment]
         self.hs_clock = Clock(self.clock)
         self.url = "/_matrix/client/r0/register"
         self.registration_handler = Mock()
         self.auth_handler = Mock()
         self.device_handler = Mock()
 
-    def test_ui_auth(self):
+    def test_ui_auth(self) -> None:
         # Do a UI auth request
-        request_data = {"username": "kermit", "password": "monkey"}
+        request_data: JsonDict = {"username": "kermit", "password": "monkey"}
         channel = self.make_request(b"POST", self.url, request_data)
 
         self.assertEqual(channel.code, 401, channel.result)
@@ -78,7 +91,9 @@ class TermsTestCase(unittest.HomeserverTestCase):
             }
         }
         self.assertIsInstance(channel.json_body["params"], dict)
-        self.assertDictContainsSubset(channel.json_body["params"], expected_params)
+        self.assertLessEqual(
+            channel.json_body["params"].items(), expected_params.items()
+        )
 
         # We have to complete the dummy auth stage before completing the terms stage
         request_data = {

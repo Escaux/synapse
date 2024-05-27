@@ -1,17 +1,24 @@
-# Copyright 2015, 2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import itertools
 import logging
@@ -25,7 +32,6 @@ from typing import (
     Iterable,
     Mapping,
     Optional,
-    Sequence,
     Set,
     Tuple,
     Type,
@@ -49,6 +55,7 @@ import synapse.metrics._reactor_metrics  # noqa: F401
 from synapse.metrics._gc import MIN_TIME_BETWEEN_GCS, install_gc_manager
 from synapse.metrics._twisted_exposition import MetricsResource, generate_latest
 from synapse.metrics._types import Collector
+from synapse.types import StrSequence
 from synapse.util import SYNAPSE_VERSION
 
 logger = logging.getLogger(__name__)
@@ -77,9 +84,11 @@ RegistryProxy = cast(CollectorRegistry, _RegistryProxy)
 
 @attr.s(slots=True, hash=True, auto_attribs=True)
 class LaterGauge(Collector):
+    """A Gauge which periodically calls a user-provided callback to produce metrics."""
+
     name: str
     desc: str
-    labels: Optional[Sequence[str]] = attr.ib(hash=False)
+    labels: Optional[StrSequence] = attr.ib(hash=False)
     # callback: should either return a value (if there are no labels for this metric),
     # or dict mapping from a label tuple to a value
     caller: Callable[
@@ -87,7 +96,6 @@ class LaterGauge(Collector):
     ]
 
     def collect(self) -> Iterable[Metric]:
-
         g = GaugeMetricFamily(self.name, self.desc, labels=self.labels)
 
         try:
@@ -142,8 +150,8 @@ class InFlightGauge(Generic[MetricsEntry], Collector):
         self,
         name: str,
         desc: str,
-        labels: Sequence[str],
-        sub_metrics: Sequence[str],
+        labels: StrSequence,
+        sub_metrics: StrSequence,
     ):
         self.name = name
         self.desc = desc

@@ -1,17 +1,24 @@
-# Copyright 2014-2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import argparse
 import logging
 import logging.config
@@ -34,6 +41,7 @@ from twisted.logger import (
 
 from synapse.logging.context import LoggingContextFilter
 from synapse.logging.filter import MetadataFilter
+from synapse.synapse_rust import reset_logging_config
 from synapse.types import JsonDict
 
 from ..util import SYNAPSE_VERSION
@@ -54,7 +62,7 @@ DEFAULT_LOG_CONFIG = Template(
 # be ingested by ELK stacks. See [2] for details.
 #
 # [1]: https://docs.python.org/3/library/logging.config.html#configuration-dictionary-schema
-# [2]: https://matrix-org.github.io/synapse/latest/structured_logging.html
+# [2]: https://element-hq.github.io/synapse/latest/structured_logging.html
 
 version: 1
 
@@ -116,9 +124,7 @@ root:
     # Write logs to the `buffer` handler, which will buffer them together in memory,
     # then write them to a file.
     #
-    # Replace "buffer" with "console" to log to stderr instead. (Note that you'll
-    # also need to update the configuration for the `twisted` logger above, in
-    # this case.)
+    # Replace "buffer" with "console" to log to stderr instead.
     #
     handlers: [buffer]
 
@@ -134,7 +140,7 @@ removed in Synapse 1.3.0. You should instead set up a separate log configuration
 STRUCTURED_ERROR = """\
 Support for the structured configuration option was removed in Synapse 1.54.0.
 You should instead use the standard logging configuration. See
-https://matrix-org.github.io/synapse/v1.54/structured_logging.html
+https://element-hq.github.io/synapse/v1.54/structured_logging.html
 """
 
 
@@ -200,24 +206,6 @@ def _setup_stdlib_logging(
     """
     Set up Python standard library logging.
     """
-    if log_config_path is None:
-        log_format = (
-            "%(asctime)s - %(name)s - %(lineno)d - %(levelname)s - %(request)s"
-            " - %(message)s"
-        )
-
-        logger = logging.getLogger("")
-        logger.setLevel(logging.INFO)
-        logging.getLogger("synapse.storage.SQL").setLevel(logging.INFO)
-
-        formatter = logging.Formatter(log_format)
-
-        handler = logging.StreamHandler()
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-    else:
-        # Load the logging configuration.
-        _load_logging_config(log_config_path)
 
     # We add a log record factory that runs all messages through the
     # LoggingContextFilter so that we get the context *at the time we log*
@@ -236,6 +224,26 @@ def _setup_stdlib_logging(
         return record
 
     logging.setLogRecordFactory(factory)
+
+    # Configure the logger with the initial configuration.
+    if log_config_path is None:
+        log_format = (
+            "%(asctime)s - %(name)s - %(lineno)d - %(levelname)s - %(request)s"
+            " - %(message)s"
+        )
+
+        logger = logging.getLogger("")
+        logger.setLevel(logging.INFO)
+        logging.getLogger("synapse.storage.SQL").setLevel(logging.INFO)
+
+        formatter = logging.Formatter(log_format)
+
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    else:
+        # Load the logging configuration.
+        _load_logging_config(log_config_path)
 
     # Route Twisted's native logging through to the standard library logging
     # system.
@@ -294,6 +302,9 @@ def _load_logging_config(log_config_path: str) -> None:
 
     logging.config.dictConfig(log_config)
 
+    # Blow away the pyo3-log cache so that it reloads the configuration.
+    reset_logging_config()
+
 
 def _reload_logging_config(log_config_path: Optional[str]) -> None:
     """
@@ -346,6 +357,10 @@ def setup_logging(
         "Server %s version %s",
         sys.argv[0],
         SYNAPSE_VERSION,
+    )
+    logging.warning("Copyright (c) 2023 New Vector, Inc")
+    logging.warning(
+        "Licensed under the AGPL 3.0 license. Website: https://github.com/element-hq/synapse"
     )
     logging.info("Server hostname: %s", config.server.server_name)
     logging.info("Instance name: %s", hs.get_instance_name())

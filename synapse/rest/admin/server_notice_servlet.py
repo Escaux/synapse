@@ -1,18 +1,24 @@
-# Copyright 2019 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Awaitable, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from synapse.api.constants import EventTypes
 from synapse.api.errors import NotFoundError, SynapseError
@@ -23,10 +29,10 @@ from synapse.http.servlet import (
     parse_json_object_from_request,
 )
 from synapse.http.site import SynapseRequest
-from synapse.rest.admin import assert_requester_is_admin
-from synapse.rest.admin._base import admin_patterns
+from synapse.logging.opentracing import set_tag
+from synapse.rest.admin._base import admin_patterns, assert_user_is_admin
 from synapse.rest.client.transactions import HttpTransactionCache
-from synapse.types import JsonDict, UserID
+from synapse.types import JsonDict, Requester, UserID
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -70,10 +76,13 @@ class SendServerNoticeServlet(RestServlet):
             self.__class__.__name__,
         )
 
-    async def on_POST(
-        self, request: SynapseRequest, txn_id: Optional[str] = None
+    async def _do(
+        self,
+        request: SynapseRequest,
+        requester: Requester,
+        txn_id: Optional[str],
     ) -> Tuple[int, JsonDict]:
-        await assert_requester_is_admin(self.auth, request)
+        await assert_user_is_admin(self.auth, requester)
         body = parse_json_object_from_request(request)
         assert_params_in_dict(body, ("user_id", "content"))
         event_type = body.get("type", EventTypes.Message)
@@ -106,9 +115,18 @@ class SendServerNoticeServlet(RestServlet):
 
         return HTTPStatus.OK, {"event_id": event.event_id}
 
-    def on_PUT(
+    async def on_POST(
+        self,
+        request: SynapseRequest,
+    ) -> Tuple[int, JsonDict]:
+        requester = await self.auth.get_user_by_req(request)
+        return await self._do(request, requester, None)
+
+    async def on_PUT(
         self, request: SynapseRequest, txn_id: str
-    ) -> Awaitable[Tuple[int, JsonDict]]:
-        return self.txns.fetch_or_execute_request(
-            request, self.on_POST, request, txn_id
+    ) -> Tuple[int, JsonDict]:
+        requester = await self.auth.get_user_by_req(request)
+        set_tag("txn_id", txn_id)
+        return await self.txns.fetch_or_execute_request(
+            request, requester, self._do, request, requester, txn_id
         )

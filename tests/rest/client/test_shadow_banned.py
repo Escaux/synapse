@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 #  Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from unittest.mock import Mock, patch
 
@@ -84,7 +91,7 @@ class RoomTestCase(_ShadowBannedBase):
     def test_invite_3pid(self) -> None:
         """Ensure that a 3PID invite does not attempt to contact the identity server."""
         identity_handler = self.hs.get_identity_handler()
-        identity_handler.lookup_3pid = Mock(
+        identity_handler.lookup_3pid = Mock(  # type: ignore[method-assign]
             side_effect=AssertionError("This should not get called")
         )
 
@@ -222,7 +229,7 @@ class RoomTestCase(_ShadowBannedBase):
             event_source.get_new_events(
                 user=UserID.from_string(self.other_user_id),
                 from_key=0,
-                limit=None,
+                limit=10,
                 room_ids=[room_id],
                 is_guest=False,
             )
@@ -286,6 +293,7 @@ class ProfileTestCase(_ShadowBannedBase):
                 self.banned_user_id,
             )
         )
+        assert event is not None
         self.assertEqual(
             event.content, {"membership": "join", "displayname": original_display_name}
         )
@@ -321,6 +329,7 @@ class ProfileTestCase(_ShadowBannedBase):
                 self.banned_user_id,
             )
         )
+        assert event is not None
         self.assertEqual(
             event.content, {"membership": "join", "displayname": original_display_name}
         )

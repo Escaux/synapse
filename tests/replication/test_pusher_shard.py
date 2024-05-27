@@ -1,23 +1,33 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from unittest.mock import Mock
 
 from twisted.internet import defer
+from twisted.test.proto_helpers import MemoryReactor
 
 from synapse.rest import admin
 from synapse.rest.client import login, room
+from synapse.server import HomeServer
+from synapse.util import Clock
 
 from tests.replication._base import BaseMultiWorkerStreamTestCase
 
@@ -33,12 +43,12 @@ class PusherShardTestCase(BaseMultiWorkerStreamTestCase):
         login.register_servlets,
     ]
 
-    def prepare(self, reactor, clock, hs):
+    def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
         # Register a user who sends a message that we'll get notified about
         self.other_user_id = self.register_user("otheruser", "pass")
         self.other_access_token = self.login("otheruser", "pass")
 
-    def _create_pusher_and_send_msg(self, localpart):
+    def _create_pusher_and_send_msg(self, localpart: str) -> str:
         # Create a user that will get push notifications
         user_id = self.register_user(localpart, "pass")
         access_token = self.login(localpart, "pass")
@@ -47,12 +57,13 @@ class PusherShardTestCase(BaseMultiWorkerStreamTestCase):
         user_dict = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_dict.token_id
+        assert user_dict is not None
+        device_id = user_dict.device_id
 
         self.get_success(
             self.hs.get_pusherpool().add_or_update_pusher(
                 user_id=user_id,
-                access_token=token_id,
+                device_id=device_id,
                 kind="http",
                 app_id="m.http",
                 app_display_name="HTTP Push Notifications",
@@ -79,7 +90,7 @@ class PusherShardTestCase(BaseMultiWorkerStreamTestCase):
 
         return event_id
 
-    def test_send_push_single_worker(self):
+    def test_send_push_single_worker(self) -> None:
         """Test that registration works when using a pusher worker."""
         http_client_mock = Mock(spec_set=["post_json_get_json"])
         http_client_mock.post_json_get_json.side_effect = (
@@ -89,7 +100,7 @@ class PusherShardTestCase(BaseMultiWorkerStreamTestCase):
         self.make_worker_hs(
             "synapse.app.generic_worker",
             {"worker_name": "pusher1", "pusher_instances": ["pusher1"]},
-            proxied_blacklisted_http_client=http_client_mock,
+            proxied_blocklisted_http_client=http_client_mock,
         )
 
         event_id = self._create_pusher_and_send_msg("user")
@@ -109,7 +120,7 @@ class PusherShardTestCase(BaseMultiWorkerStreamTestCase):
             ],
         )
 
-    def test_send_push_multiple_workers(self):
+    def test_send_push_multiple_workers(self) -> None:
         """Test that registration works when using sharded pusher workers."""
         http_client_mock1 = Mock(spec_set=["post_json_get_json"])
         http_client_mock1.post_json_get_json.side_effect = (
@@ -122,7 +133,7 @@ class PusherShardTestCase(BaseMultiWorkerStreamTestCase):
                 "worker_name": "pusher1",
                 "pusher_instances": ["pusher1", "pusher2"],
             },
-            proxied_blacklisted_http_client=http_client_mock1,
+            proxied_blocklisted_http_client=http_client_mock1,
         )
 
         http_client_mock2 = Mock(spec_set=["post_json_get_json"])
@@ -136,7 +147,7 @@ class PusherShardTestCase(BaseMultiWorkerStreamTestCase):
                 "worker_name": "pusher2",
                 "pusher_instances": ["pusher1", "pusher2"],
             },
-            proxied_blacklisted_http_client=http_client_mock2,
+            proxied_blocklisted_http_client=http_client_mock2,
         )
 
         # We choose a user name that we know should go to pusher1.

@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 
 from synapse.rest.client import register
@@ -29,11 +36,9 @@ class ClientReaderTestCase(BaseMultiWorkerStreamTestCase):
     def _get_worker_hs_config(self) -> dict:
         config = self.default_config()
         config["worker_app"] = "synapse.app.generic_worker"
-        config["worker_replication_host"] = "testserv"
-        config["worker_replication_http_port"] = "8765"
         return config
 
-    def test_register_single_worker(self):
+    def test_register_single_worker(self) -> None:
         """Test that registration works when using a single generic worker."""
         worker_hs = self.make_worker_hs("synapse.app.generic_worker")
         site = self._hs_to_site[worker_hs]
@@ -63,7 +68,7 @@ class ClientReaderTestCase(BaseMultiWorkerStreamTestCase):
         # We're given a registered user.
         self.assertEqual(channel_2.json_body["user_id"], "@user:test")
 
-    def test_register_multi_worker(self):
+    def test_register_multi_worker(self) -> None:
         """Test that registration works when using multiple generic workers."""
         worker_hs_1 = self.make_worker_hs("synapse.app.generic_worker")
         worker_hs_2 = self.make_worker_hs("synapse.app.generic_worker")

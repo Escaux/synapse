@@ -1,25 +1,47 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import yaml
 
+from twisted.test.proto_helpers import MemoryReactor
+
+import synapse.rest.admin
+import synapse.rest.client.login
+import synapse.rest.client.room
 from synapse.config.room_directory import RoomDirectoryConfig
+from synapse.server import HomeServer
+from synapse.util import Clock
 
 from tests import unittest
+from tests.unittest import override_config
 
 
-class RoomDirectoryConfigTestCase(unittest.TestCase):
+class RoomDirectoryConfigTestCase(unittest.HomeserverTestCase):
+    def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
+        self.store = hs.get_datastores().main
+
+    servlets = [
+        synapse.rest.admin.register_servlets,
+        synapse.rest.client.login.register_servlets,
+        synapse.rest.client.room.register_servlets,
+    ]
+
     def test_alias_creation_acl(self) -> None:
         config = yaml.safe_load(
             """
@@ -161,3 +183,20 @@ class RoomDirectoryConfigTestCase(unittest.TestCase):
                 aliases=["#unofficial_st:example.com", "#blah:example.com"],
             )
         )
+
+    @override_config({"room_list_publication_rules": []})
+    def test_room_creation_when_publishing_denied(self) -> None:
+        """
+        Test that when room publishing is denied via the config that new rooms can
+        still be created and that the newly created room is not public.
+        """
+
+        user = self.register_user("alice", "pass")
+        token = self.login("alice", "pass")
+        room_id = self.helper.create_room_as(user, is_public=True, tok=token)
+
+        res = self.get_success(self.store.get_room(room_id))
+        assert res is not None
+        is_public, _ = res
+
+        self.assertFalse(is_public)

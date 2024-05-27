@@ -1,16 +1,22 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 import threading
@@ -47,6 +53,9 @@ from synapse.metrics._types import Collector
 
 if TYPE_CHECKING:
     import resource
+
+    # Old versions don't have `LiteralString`
+    from typing_extensions import LiteralString
 
 
 logger = logging.getLogger(__name__)
@@ -191,7 +200,7 @@ R = TypeVar("R")
 
 
 def run_as_background_process(
-    desc: str,
+    desc: "LiteralString",
     func: Callable[..., Awaitable[Optional[R]]],
     *args: Any,
     bg_start_span: bool = True,
@@ -259,7 +268,7 @@ P = ParamSpec("P")
 
 
 def wrap_as_background_process(
-    desc: str,
+    desc: "LiteralString",
 ) -> Callable[
     [Callable[P, Awaitable[Optional[R]]]],
     Callable[P, "defer.Deferred[Optional[R]]"],
@@ -322,12 +331,20 @@ class BackgroundProcessLoggingContext(LoggingContext):
         if instance_id is None:
             instance_id = id(self)
         super().__init__("%s-%s" % (name, instance_id))
-        self._proc = _BackgroundProcess(name, self)
+        self._proc: Optional[_BackgroundProcess] = _BackgroundProcess(name, self)
 
     def start(self, rusage: "Optional[resource.struct_rusage]") -> None:
         """Log context has started running (again)."""
 
         super().start(rusage)
+
+        if self._proc is None:
+            logger.error(
+                "Background process re-entered without a proc: %s",
+                self.name,
+                stack_info=True,
+            )
+            return
 
         # We've become active again so we make sure we're in the list of active
         # procs. (Note that "start" here means we've become active, as opposed
@@ -345,6 +362,14 @@ class BackgroundProcessLoggingContext(LoggingContext):
 
         super().__exit__(type, value, traceback)
 
+        if self._proc is None:
+            logger.error(
+                "Background process exited without a proc: %s",
+                self.name,
+                stack_info=True,
+            )
+            return
+
         # The background process has finished. We explicitly remove and manually
         # update the metrics here so that if nothing is scraping metrics the set
         # doesn't infinitely grow.
@@ -352,3 +377,6 @@ class BackgroundProcessLoggingContext(LoggingContext):
             _background_processes_active_since_last_scrape.discard(self._proc)
 
         self._proc.update_metrics()
+
+        # Set proc to None to break the reference cycle.
+        self._proc = None

@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, Tuple
@@ -18,7 +25,6 @@ from typing import TYPE_CHECKING, Tuple
 from twisted.web.server import Request
 
 from synapse.http.server import HttpServer
-from synapse.http.servlet import parse_json_object_from_request
 from synapse.replication.http._base import ReplicationEndpoint
 from synapse.types import JsonDict
 
@@ -61,10 +67,8 @@ class ReplicationAddUserAccountDataRestServlet(ReplicationEndpoint):
         return payload
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request, user_id: str, account_data_type: str
+        self, request: Request, content: JsonDict, user_id: str, account_data_type: str
     ) -> Tuple[int, JsonDict]:
-        content = parse_json_object_from_request(request)
-
         max_stream_id = await self.handler.add_account_data_for_user(
             user_id, account_data_type, content["content"]
         )
@@ -101,7 +105,7 @@ class ReplicationRemoveUserAccountDataRestServlet(ReplicationEndpoint):
         return {}
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request, user_id: str, account_data_type: str
+        self, request: Request, content: JsonDict, user_id: str, account_data_type: str
     ) -> Tuple[int, JsonDict]:
         max_stream_id = await self.handler.remove_account_data_for_user(
             user_id, account_data_type
@@ -143,10 +147,13 @@ class ReplicationAddRoomAccountDataRestServlet(ReplicationEndpoint):
         return payload
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request, user_id: str, room_id: str, account_data_type: str
+        self,
+        request: Request,
+        content: JsonDict,
+        user_id: str,
+        room_id: str,
+        account_data_type: str,
     ) -> Tuple[int, JsonDict]:
-        content = parse_json_object_from_request(request)
-
         max_stream_id = await self.handler.add_account_data_to_room(
             user_id, room_id, account_data_type, content["content"]
         )
@@ -183,7 +190,12 @@ class ReplicationRemoveRoomAccountDataRestServlet(ReplicationEndpoint):
         return {}
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request, user_id: str, room_id: str, account_data_type: str
+        self,
+        request: Request,
+        content: JsonDict,
+        user_id: str,
+        room_id: str,
+        account_data_type: str,
     ) -> Tuple[int, JsonDict]:
         max_stream_id = await self.handler.remove_account_data_for_room(
             user_id, room_id, account_data_type
@@ -225,10 +237,8 @@ class ReplicationAddTagRestServlet(ReplicationEndpoint):
         return payload
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request, user_id: str, room_id: str, tag: str
+        self, request: Request, content: JsonDict, user_id: str, room_id: str, tag: str
     ) -> Tuple[int, JsonDict]:
-        content = parse_json_object_from_request(request)
-
         max_stream_id = await self.handler.add_tag_to_room(
             user_id, room_id, tag, content["content"]
         )
@@ -262,11 +272,10 @@ class ReplicationRemoveTagRestServlet(ReplicationEndpoint):
 
     @staticmethod
     async def _serialize_payload(user_id: str, room_id: str, tag: str) -> JsonDict:  # type: ignore[override]
-
         return {}
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request, user_id: str, room_id: str, tag: str
+        self, request: Request, content: JsonDict, user_id: str, room_id: str, tag: str
     ) -> Tuple[int, JsonDict]:
         max_stream_id = await self.handler.remove_tag_from_room(
             user_id,

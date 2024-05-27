@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """Tests REST events for /profile paths."""
 import urllib.parse
@@ -30,7 +37,6 @@ from tests import unittest
 
 
 class ProfileTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         admin.register_servlets_for_client_rest_resource,
         login.register_servlets,
@@ -62,6 +68,18 @@ class ProfileTestCase(unittest.HomeserverTestCase):
             "PUT",
             "/profile/%s/displayname" % (self.owner,),
             content={"displayname": "test"},
+            access_token=self.owner_tok,
+        )
+        self.assertEqual(channel.code, 200, channel.result)
+
+        res = self._get_displayname()
+        self.assertEqual(res, "test")
+
+    def test_set_displayname_with_extra_spaces(self) -> None:
+        channel = self.make_request(
+            "PUT",
+            "/profile/%s/displayname" % (self.owner,),
+            content={"displayname": "  test  "},
             access_token=self.owner_tok,
         )
         self.assertEqual(channel.code, 200, channel.result)
@@ -159,7 +177,8 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
         self.assertEqual(channel.code, 200, channel.result)
         # FIXME: If a user has no displayname set, Synapse returns 200 and omits a
-        # displayname from the response. This contradicts the spec, see #13137.
+        # displayname from the response. This contradicts the spec, see
+        # https://github.com/matrix-org/synapse/issues/13137.
         return channel.json_body.get("displayname")
 
     def _get_avatar_url(self, name: Optional[str] = None) -> Optional[str]:
@@ -168,7 +187,8 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
         self.assertEqual(channel.code, 200, channel.result)
         # FIXME: If a user has no avatar set, Synapse returns 200 and omits an
-        # avatar_url from the response. This contradicts the spec, see #13137.
+        # avatar_url from the response. This contradicts the spec, see
+        # https://github.com/matrix-org/synapse/issues/13137.
         return channel.json_body.get("avatar_url")
 
     @unittest.override_config({"max_avatar_size": 50})
@@ -299,6 +319,166 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
         self.assertEqual(channel.code, 200, channel.result)
 
+    @unittest.override_config(
+        {"experimental_features": {"msc4069_profile_inhibit_propagation": True}}
+    )
+    def test_msc4069_inhibit_propagation(self) -> None:
+        """Tests to ensure profile update propagation can be inhibited."""
+        for prop in ["avatar_url", "displayname"]:
+            room_id = self.helper.create_room_as(tok=self.owner_tok)
+
+            channel = self.make_request(
+                "PUT",
+                f"/rooms/{room_id}/state/m.room.member/{self.owner}",
+                content={"membership": "join", prop: "mxc://my.server/existing"},
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            channel = self.make_request(
+                "PUT",
+                f"/profile/{self.owner}/{prop}?org.matrix.msc4069.propagate=false",
+                content={prop: "http://my.server/pic.gif"},
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            res = (
+                self._get_avatar_url()
+                if prop == "avatar_url"
+                else self._get_displayname()
+            )
+            self.assertEqual(res, "http://my.server/pic.gif")
+
+            channel = self.make_request(
+                "GET",
+                f"/rooms/{room_id}/state/m.room.member/{self.owner}",
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+            self.assertEqual(channel.json_body.get(prop), "mxc://my.server/existing")
+
+    def test_msc4069_inhibit_propagation_disabled(self) -> None:
+        """Tests to ensure profile update propagation inhibit flags are ignored when the
+        experimental flag is not enabled.
+        """
+        for prop in ["avatar_url", "displayname"]:
+            room_id = self.helper.create_room_as(tok=self.owner_tok)
+
+            channel = self.make_request(
+                "PUT",
+                f"/rooms/{room_id}/state/m.room.member/{self.owner}",
+                content={"membership": "join", prop: "mxc://my.server/existing"},
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            channel = self.make_request(
+                "PUT",
+                f"/profile/{self.owner}/{prop}?org.matrix.msc4069.propagate=false",
+                content={prop: "http://my.server/pic.gif"},
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            res = (
+                self._get_avatar_url()
+                if prop == "avatar_url"
+                else self._get_displayname()
+            )
+            self.assertEqual(res, "http://my.server/pic.gif")
+
+            channel = self.make_request(
+                "GET",
+                f"/rooms/{room_id}/state/m.room.member/{self.owner}",
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            # The ?propagate=false should be ignored by the server because the config flag
+            # isn't enabled.
+            self.assertEqual(channel.json_body.get(prop), "http://my.server/pic.gif")
+
+    def test_msc4069_inhibit_propagation_default(self) -> None:
+        """Tests to ensure profile update propagation happens by default."""
+        for prop in ["avatar_url", "displayname"]:
+            room_id = self.helper.create_room_as(tok=self.owner_tok)
+
+            channel = self.make_request(
+                "PUT",
+                f"/rooms/{room_id}/state/m.room.member/{self.owner}",
+                content={"membership": "join", prop: "mxc://my.server/existing"},
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            channel = self.make_request(
+                "PUT",
+                f"/profile/{self.owner}/{prop}",
+                content={prop: "http://my.server/pic.gif"},
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            res = (
+                self._get_avatar_url()
+                if prop == "avatar_url"
+                else self._get_displayname()
+            )
+            self.assertEqual(res, "http://my.server/pic.gif")
+
+            channel = self.make_request(
+                "GET",
+                f"/rooms/{room_id}/state/m.room.member/{self.owner}",
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            # The ?propagate=false should be ignored by the server because the config flag
+            # isn't enabled.
+            self.assertEqual(channel.json_body.get(prop), "http://my.server/pic.gif")
+
+    @unittest.override_config(
+        {"experimental_features": {"msc4069_profile_inhibit_propagation": True}}
+    )
+    def test_msc4069_inhibit_propagation_like_default(self) -> None:
+        """Tests to ensure clients can request explicit profile propagation."""
+        for prop in ["avatar_url", "displayname"]:
+            room_id = self.helper.create_room_as(tok=self.owner_tok)
+
+            channel = self.make_request(
+                "PUT",
+                f"/rooms/{room_id}/state/m.room.member/{self.owner}",
+                content={"membership": "join", prop: "mxc://my.server/existing"},
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            channel = self.make_request(
+                "PUT",
+                f"/profile/{self.owner}/{prop}?org.matrix.msc4069.propagate=true",
+                content={prop: "http://my.server/pic.gif"},
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            res = (
+                self._get_avatar_url()
+                if prop == "avatar_url"
+                else self._get_displayname()
+            )
+            self.assertEqual(res, "http://my.server/pic.gif")
+
+            channel = self.make_request(
+                "GET",
+                f"/rooms/{room_id}/state/m.room.member/{self.owner}",
+                access_token=self.owner_tok,
+            )
+            self.assertEqual(channel.code, 200, channel.result)
+
+            # The client requested ?propagate=true, so it should have happened.
+            self.assertEqual(channel.json_body.get(prop), "http://my.server/pic.gif")
+
     def _setup_local_files(self, names_and_props: Dict[str, Dict[str, Any]]) -> None:
         """Stores metadata about files in the database.
 
@@ -324,7 +504,6 @@ class ProfileTestCase(unittest.HomeserverTestCase):
 
 
 class ProfilesRestrictedTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         admin.register_servlets_for_client_rest_resource,
         login.register_servlets,
@@ -404,7 +583,6 @@ class ProfilesRestrictedTestCase(unittest.HomeserverTestCase):
 
 
 class OwnProfileUnrestrictedTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         admin.register_servlets_for_client_rest_resource,
         login.register_servlets,

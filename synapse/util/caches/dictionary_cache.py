@@ -1,20 +1,27 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import enum
 import logging
 import threading
-from typing import Any, Dict, Generic, Iterable, Optional, Set, Tuple, TypeVar, Union
+from typing import Dict, Generic, Iterable, Optional, Set, Tuple, TypeVar, Union
 
 import attr
 from typing_extensions import Literal
@@ -33,10 +40,8 @@ DKT = TypeVar("DKT")
 DV = TypeVar("DV")
 
 
-# This class can't be generic because it uses slots with attrs.
-# See: https://github.com/python-attrs/attrs/issues/313
 @attr.s(slots=True, frozen=True, auto_attribs=True)
-class DictionaryEntry:  # should be: Generic[DKT, DV].
+class DictionaryEntry(Generic[DKT, DV]):
     """Returned when getting an entry from the cache
 
     If `full` is true then `known_absent` will be the empty set.
@@ -50,8 +55,8 @@ class DictionaryEntry:  # should be: Generic[DKT, DV].
     """
 
     full: bool
-    known_absent: Set[Any]  # should be: Set[DKT]
-    value: Dict[Any, Any]  # should be: Dict[DKT, DV]
+    known_absent: Set[DKT]
+    value: Dict[DKT, DV]
 
     def __len__(self) -> int:
         return len(self.value)
@@ -224,7 +229,7 @@ class DictionaryCache(Generic[KT, DKT, DV]):
         for dict_key in missing:
             # We explicitly add each dict key to the cache, so that cache hit
             # rates and LRU times for each key can be tracked separately.
-            value = entry.get(dict_key, _Sentinel.sentinel)  # type: ignore[arg-type]
+            value = entry.get(dict_key, _Sentinel.sentinel)
             self.cache[(key, dict_key)] = _PerKeyValue(value)
 
             if value is not _Sentinel.sentinel:

@@ -1,19 +1,26 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 Quentin Gliech
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import os
 from typing import Any, Awaitable, ContextManager, Dict, Optional, Tuple
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pymacaroons
@@ -28,7 +35,7 @@ from synapse.util import Clock
 from synapse.util.macaroons import get_value_from_macaroon
 from synapse.util.stringutils import random_string
 
-from tests.test_utils import FakeResponse, get_awaitable_result, simple_async_mock
+from tests.test_utils import FakeResponse, get_awaitable_result
 from tests.test_utils.oidc import FakeAuthorizationGrant, FakeOidcServer
 from tests.unittest import HomeserverTestCase, override_config
 
@@ -150,27 +157,27 @@ class OidcHandlerTestCase(HomeserverTestCase):
 
         hs = self.setup_test_homeserver()
         self.hs_patcher = self.fake_server.patch_homeserver(hs=hs)
-        self.hs_patcher.start()
+        self.hs_patcher.start()  # type: ignore[attr-defined]
 
         self.handler = hs.get_oidc_handler()
         self.provider = self.handler._providers["oidc"]
         sso_handler = hs.get_sso_handler()
         # Mock the render error method.
         self.render_error = Mock(return_value=None)
-        sso_handler.render_error = self.render_error  # type: ignore[assignment]
+        sso_handler.render_error = self.render_error  # type: ignore[method-assign]
 
         # Reduce the number of attempts when generating MXIDs.
         sso_handler._MAP_USERNAME_RETRIES = 3
 
         auth_handler = hs.get_auth_handler()
         # Mock the complete SSO login method.
-        self.complete_sso_login = simple_async_mock()
-        auth_handler.complete_sso_login = self.complete_sso_login  # type: ignore[assignment]
+        self.complete_sso_login = AsyncMock()
+        auth_handler.complete_sso_login = self.complete_sso_login  # type: ignore[method-assign]
 
         return hs
 
     def tearDown(self) -> None:
-        self.hs_patcher.stop()
+        self.hs_patcher.stop()  # type: ignore[attr-defined]
         return super().tearDown()
 
     def reset_mocks(self) -> None:
@@ -922,7 +929,7 @@ class OidcHandlerTestCase(HomeserverTestCase):
             auth_provider_session_id=None,
         )
 
-    @override_config({"oidc_config": DEFAULT_CONFIG})
+    @override_config({"oidc_config": {**DEFAULT_CONFIG, "enable_registration": True}})
     def test_map_userinfo_to_user(self) -> None:
         """Ensure that mapping the userinfo returned from a provider to an MXID works properly."""
         userinfo: dict = {
@@ -973,6 +980,21 @@ class OidcHandlerTestCase(HomeserverTestCase):
         self.assertRenderedError(
             "mapping_error",
             "Mapping provider does not support de-duplicating Matrix IDs",
+        )
+
+    @override_config({"oidc_config": {**DEFAULT_CONFIG, "enable_registration": False}})
+    def test_map_userinfo_to_user_does_not_register_new_user(self) -> None:
+        """Ensures new users are not registered if the enabled registration flag is disabled."""
+        userinfo: dict = {
+            "sub": "test_user",
+            "username": "test_user",
+        }
+        request, _ = self.start_authorization(userinfo)
+        self.get_success(self.handler.handle_oidc_callback(request))
+        self.complete_sso_login.assert_not_called()
+        self.assertRenderedError(
+            "mapping_error",
+            "User does not exist and registrations are disabled",
         )
 
     @override_config({"oidc_config": {**DEFAULT_CONFIG, "allow_existing_users": True}})

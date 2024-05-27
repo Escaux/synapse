@@ -1,16 +1,22 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 #  Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
 #
 
 """
@@ -21,16 +27,13 @@ require. But this is probably just symptomatic of Python's package management.
 """
 
 import logging
+from importlib import metadata
 from typing import Iterable, NamedTuple, Optional
 
 from packaging.requirements import Requirement
 
 DISTRIBUTION_NAME = "matrix-synapse"
 
-try:
-    from importlib import metadata
-except ImportError:
-    import importlib_metadata as metadata  # type: ignore[no-redef]
 
 __all__ = ["check_requirements"]
 
@@ -54,9 +57,9 @@ class DependencyException(Exception):
 
 
 DEV_EXTRAS = {"lint", "mypy", "test", "dev"}
-RUNTIME_EXTRAS = (
-    set(metadata.metadata(DISTRIBUTION_NAME).get_all("Provides-Extra")) - DEV_EXTRAS
-)
+ALL_EXTRAS = metadata.metadata(DISTRIBUTION_NAME).get_all("Provides-Extra")
+assert ALL_EXTRAS is not None
+RUNTIME_EXTRAS = set(ALL_EXTRAS) - DEV_EXTRAS
 VERSION = metadata.version(DISTRIBUTION_NAME)
 
 
@@ -183,7 +186,7 @@ def check_requirements(extra: Optional[str] = None) -> None:
     deps_unfulfilled = []
     errors = []
 
-    for (requirement, must_be_installed) in dependencies:
+    for requirement, must_be_installed in dependencies:
         try:
             dist: metadata.Distribution = metadata.distribution(requirement.name)
         except metadata.PackageNotFoundError:
@@ -192,7 +195,8 @@ def check_requirements(extra: Optional[str] = None) -> None:
                 errors.append(_not_installed(requirement, extra))
         else:
             if dist.version is None:
-                # This shouldn't happen---it suggests a borked virtualenv. (See #12223)
+                # This shouldn't happen---it suggests a borked virtualenv. (See
+                # https://github.com/matrix-org/synapse/issues/12223)
                 # Try to give a vaguely helpful error message anyway.
                 # Type-ignore: the annotations don't reflect reality: see
                 #     https://github.com/python/typeshed/issues/7513

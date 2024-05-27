@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import os.path
 from unittest.mock import Mock, patch
@@ -43,8 +50,9 @@ class CleanupExtremBackgroundUpdateStoreTestCase(HomeserverTestCase):
         # Create a test user and room
         self.user = UserID("alice", "test")
         self.requester = create_requester(self.user)
-        info, _ = self.get_success(self.room_creator.create_room(self.requester, {}))
-        self.room_id = info["room_id"]
+        self.room_id, _, _ = self.get_success(
+            self.room_creator.create_room(self.requester, {})
+        )
 
     def run_background_update(self) -> None:
         """Re run the background update to clean up the extremities."""
@@ -119,7 +127,7 @@ class CleanupExtremBackgroundUpdateStoreTestCase(HomeserverTestCase):
             self.store.get_latest_event_ids_in_room(self.room_id)
         )
 
-        self.assertEqual(latest_event_ids, [event_id_4])
+        self.assertEqual(latest_event_ids, {event_id_4})
 
     def test_basic_cleanup(self) -> None:
         """Test that extremities are correctly calculated in the presence of
@@ -146,7 +154,7 @@ class CleanupExtremBackgroundUpdateStoreTestCase(HomeserverTestCase):
         latest_event_ids = self.get_success(
             self.store.get_latest_event_ids_in_room(self.room_id)
         )
-        self.assertEqual(set(latest_event_ids), {event_id_a, event_id_b})
+        self.assertEqual(latest_event_ids, {event_id_a, event_id_b})
 
         # Run the background update and check it did the right thing
         self.run_background_update()
@@ -154,7 +162,7 @@ class CleanupExtremBackgroundUpdateStoreTestCase(HomeserverTestCase):
         latest_event_ids = self.get_success(
             self.store.get_latest_event_ids_in_room(self.room_id)
         )
-        self.assertEqual(latest_event_ids, [event_id_b])
+        self.assertEqual(latest_event_ids, {event_id_b})
 
     def test_chain_of_fail_cleanup(self) -> None:
         """Test that extremities are correctly calculated in the presence of
@@ -184,7 +192,7 @@ class CleanupExtremBackgroundUpdateStoreTestCase(HomeserverTestCase):
         latest_event_ids = self.get_success(
             self.store.get_latest_event_ids_in_room(self.room_id)
         )
-        self.assertEqual(set(latest_event_ids), {event_id_a, event_id_b})
+        self.assertEqual(latest_event_ids, {event_id_a, event_id_b})
 
         # Run the background update and check it did the right thing
         self.run_background_update()
@@ -192,7 +200,7 @@ class CleanupExtremBackgroundUpdateStoreTestCase(HomeserverTestCase):
         latest_event_ids = self.get_success(
             self.store.get_latest_event_ids_in_room(self.room_id)
         )
-        self.assertEqual(latest_event_ids, [event_id_b])
+        self.assertEqual(latest_event_ids, {event_id_b})
 
     def test_forked_graph_cleanup(self) -> None:
         r"""Test that extremities are correctly calculated in the presence of
@@ -239,7 +247,7 @@ class CleanupExtremBackgroundUpdateStoreTestCase(HomeserverTestCase):
         latest_event_ids = self.get_success(
             self.store.get_latest_event_ids_in_room(self.room_id)
         )
-        self.assertEqual(set(latest_event_ids), {event_id_a, event_id_b, event_id_c})
+        self.assertEqual(latest_event_ids, {event_id_a, event_id_b, event_id_c})
 
         # Run the background update and check it did the right thing
         self.run_background_update()
@@ -247,7 +255,7 @@ class CleanupExtremBackgroundUpdateStoreTestCase(HomeserverTestCase):
         latest_event_ids = self.get_success(
             self.store.get_latest_event_ids_in_room(self.room_id)
         )
-        self.assertEqual(set(latest_event_ids), {event_id_b, event_id_c})
+        self.assertEqual(latest_event_ids, {event_id_b, event_id_c})
 
 
 class CleanupExtremDummyEventsTestCase(HomeserverTestCase):
@@ -275,10 +283,9 @@ class CleanupExtremDummyEventsTestCase(HomeserverTestCase):
         self.user = UserID.from_string(self.register_user("user1", "password"))
         self.token1 = self.login("user1", "password")
         self.requester = create_requester(self.user)
-        info, _ = self.get_success(
+        self.room_id, _, _ = self.get_success(
             self.room_creator.create_room(self.requester, {"visibility": "public"})
         )
-        self.room_id = info["room_id"]
         self.event_creator = homeserver.get_event_creation_handler()
         homeserver.config.consent.user_consent_version = self.CONSENT_VERSION
 
@@ -330,15 +337,15 @@ class CleanupExtremDummyEventsTestCase(HomeserverTestCase):
         """Simple test to ensure that _expire_rooms_to_exclude_from_dummy_event_insertion()
         expires old entries correctly.
         """
-        self.event_creator_handler._rooms_to_exclude_from_dummy_event_insertion[
-            "1"
-        ] = 100000
-        self.event_creator_handler._rooms_to_exclude_from_dummy_event_insertion[
-            "2"
-        ] = 200000
-        self.event_creator_handler._rooms_to_exclude_from_dummy_event_insertion[
-            "3"
-        ] = 300000
+        self.event_creator_handler._rooms_to_exclude_from_dummy_event_insertion["1"] = (
+            100000
+        )
+        self.event_creator_handler._rooms_to_exclude_from_dummy_event_insertion["2"] = (
+            200000
+        )
+        self.event_creator_handler._rooms_to_exclude_from_dummy_event_insertion["3"] = (
+            300000
+        )
 
         self.event_creator_handler._expire_rooms_to_exclude_from_dummy_event_insertion()
         # All entries within time frame

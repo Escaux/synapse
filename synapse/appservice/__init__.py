@@ -1,29 +1,36 @@
-# Copyright 2015, 2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 import re
 from enum import Enum
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Pattern
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Pattern, Sequence
 
 import attr
 from netaddr import IPSet
 
 from synapse.api.constants import EventTypes
 from synapse.events import EventBase
-from synapse.types import DeviceListUpdates, JsonDict, UserID
+from synapse.types import DeviceListUpdates, JsonDict, JsonMapping, UserID
 from synapse.util.caches.descriptors import _CacheContext, cached
 
 if TYPE_CHECKING:
@@ -86,6 +93,7 @@ class ApplicationService:
             url.rstrip("/") if isinstance(url, str) else None
         )  # url must not end with a slash
         self.hs_token = hs_token
+        # The full Matrix ID for this application service's sender.
         self.sender = sender
         self.namespaces = self._check_namespaces(namespaces)
         self.id = id
@@ -212,7 +220,7 @@ class ApplicationService:
             True if the application service is interested in the user, False if not.
         """
         return (
-            # User is the appservice's sender_localpart user
+            # User is the appservice's configured sender_localpart user
             user_id == self.sender
             # User is in the appservice's user namespace
             or self.is_user_in_namespace(user_id)
@@ -377,9 +385,9 @@ class AppServiceTransaction:
         self,
         service: ApplicationService,
         id: int,
-        events: List[EventBase],
-        ephemeral: List[JsonDict],
-        to_device_messages: List[JsonDict],
+        events: Sequence[EventBase],
+        ephemeral: List[JsonMapping],
+        to_device_messages: List[JsonMapping],
         one_time_keys_count: TransactionOneTimeKeysCount,
         unused_fallback_keys: TransactionUnusedFallbackKeys,
         device_list_summary: DeviceListUpdates,

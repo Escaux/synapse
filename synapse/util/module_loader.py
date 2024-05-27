@@ -1,30 +1,36 @@
-# Copyright 2017 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import importlib
 import importlib.util
-import itertools
 from types import ModuleType
-from typing import Any, Iterable, Tuple, Type
+from typing import Any, Tuple, Type
 
 import jsonschema
 
 from synapse.config._base import ConfigError
 from synapse.config._util import json_error_to_config_error
+from synapse.types import StrSequence
 
 
-def load_module(provider: dict, config_path: Iterable[str]) -> Tuple[Type, Any]:
+def load_module(provider: dict, config_path: StrSequence) -> Tuple[Type, Any]:
     """Loads a synapse module with its config
 
     Args:
@@ -39,9 +45,7 @@ def load_module(provider: dict, config_path: Iterable[str]) -> Tuple[Type, Any]:
 
     modulename = provider.get("module")
     if not isinstance(modulename, str):
-        raise ConfigError(
-            "expected a string", path=itertools.chain(config_path, ("module",))
-        )
+        raise ConfigError("expected a string", path=tuple(config_path) + ("module",))
 
     # We need to import the module, and then pick the class out of
     # that, so we split based on the last dot.
@@ -55,19 +59,17 @@ def load_module(provider: dict, config_path: Iterable[str]) -> Tuple[Type, Any]:
         try:
             provider_config = provider_class.parse_config(module_config)
         except jsonschema.ValidationError as e:
-            raise json_error_to_config_error(
-                e, itertools.chain(config_path, ("config",))
-            )
+            raise json_error_to_config_error(e, tuple(config_path) + ("config",))
         except ConfigError as e:
             raise _wrap_config_error(
                 "Failed to parse config for module %r" % (modulename,),
-                prefix=itertools.chain(config_path, ("config",)),
+                prefix=tuple(config_path) + ("config",),
                 e=e,
             )
         except Exception as e:
             raise ConfigError(
                 "Failed to parse config for module %r" % (modulename,),
-                path=itertools.chain(config_path, ("config",)),
+                path=tuple(config_path) + ("config",),
             ) from e
     else:
         provider_config = module_config
@@ -92,9 +94,7 @@ def load_python_module(location: str) -> ModuleType:
     return mod
 
 
-def _wrap_config_error(
-    msg: str, prefix: Iterable[str], e: ConfigError
-) -> "ConfigError":
+def _wrap_config_error(msg: str, prefix: StrSequence, e: ConfigError) -> "ConfigError":
     """Wrap a relative ConfigError with a new path
 
     This is useful when we have a ConfigError with a relative path due to a problem
@@ -102,7 +102,7 @@ def _wrap_config_error(
     """
     path = prefix
     if e.path:
-        path = itertools.chain(prefix, e.path)
+        path = tuple(prefix) + tuple(e.path)
 
     e1 = ConfigError(msg, path)
 

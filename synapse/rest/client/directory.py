@@ -1,21 +1,34 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
-from pydantic import StrictStr
+from synapse._pydantic_compat import HAS_PYDANTIC_V2
+
+if TYPE_CHECKING or HAS_PYDANTIC_V2:
+    from pydantic.v1 import StrictStr
+else:
+    from pydantic import StrictStr
+
 from typing_extensions import Literal
 
 from twisted.web.server import Request
@@ -39,12 +52,14 @@ logger = logging.getLogger(__name__)
 
 def register_servlets(hs: "HomeServer", http_server: HttpServer) -> None:
     ClientDirectoryServer(hs).register(http_server)
-    ClientDirectoryListServer(hs).register(http_server)
-    ClientAppserviceDirectoryListServer(hs).register(http_server)
+    if hs.config.worker.worker_app is None:
+        ClientDirectoryListServer(hs).register(http_server)
+        ClientAppserviceDirectoryListServer(hs).register(http_server)
 
 
 class ClientDirectoryServer(RestServlet):
     PATTERNS = client_patterns("/directory/room/(?P<room_alias>[^/]*)$", v1=True)
+    CATEGORY = "Client API requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -139,7 +154,7 @@ class ClientDirectoryListServer(RestServlet):
         if room is None:
             raise NotFoundError("Unknown room")
 
-        return 200, {"visibility": "public" if room["is_public"] else "private"}
+        return 200, {"visibility": "public" if room[0] else "private"}
 
     class PutBody(RequestBodyModel):
         visibility: Literal["public", "private"] = "public"

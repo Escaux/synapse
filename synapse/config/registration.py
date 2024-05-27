@@ -1,17 +1,24 @@
-# Copyright 2015, 2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import argparse
 from typing import Any, Dict, Optional
 
@@ -133,7 +140,16 @@ class RegistrationConfig(Config):
 
         self.enable_set_displayname = config.get("enable_set_displayname", True)
         self.enable_set_avatar_url = config.get("enable_set_avatar_url", True)
-        self.enable_3pid_changes = config.get("enable_3pid_changes", True)
+
+        # The default value of enable_3pid_changes is True, unless msc3861 is enabled.
+        msc3861_enabled = (
+            (config.get("experimental_features") or {})
+            .get("msc3861", {})
+            .get("enabled", False)
+        )
+        self.enable_3pid_changes = config.get(
+            "enable_3pid_changes", not msc3861_enabled
+        )
 
         self.disable_msisdn_registration = config.get(
             "disable_msisdn_registration", False
@@ -155,9 +171,9 @@ class RegistrationConfig(Config):
             refreshable_access_token_lifetime = self.parse_duration(
                 refreshable_access_token_lifetime
             )
-        self.refreshable_access_token_lifetime: Optional[
-            int
-        ] = refreshable_access_token_lifetime
+        self.refreshable_access_token_lifetime: Optional[int] = (
+            refreshable_access_token_lifetime
+        )
 
         if (
             self.session_lifetime is not None
@@ -220,6 +236,14 @@ class RegistrationConfig(Config):
         self.fallback_success_template = self.read_template("auth_success.html")
 
         self.inhibit_user_in_use_error = config.get("inhibit_user_in_use_error", False)
+
+        # List of user IDs not to send out device list updates for when they
+        # register new devices. This is useful to handle bot accounts.
+        #
+        # Note: This will still send out device list updates if the device is
+        # later updated, e.g. end to end keys are added.
+        dont_notify_new_devices_for = config.get("dont_notify_new_devices_for", [])
+        self.dont_notify_new_devices_for = frozenset(dont_notify_new_devices_for)
 
     def generate_config_section(
         self, generate_secrets: bool = False, **kwargs: Any

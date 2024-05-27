@@ -1,20 +1,28 @@
-# Copyright 2020 Dirk Klimpel
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright 2020 Dirk Klimpel
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from typing import List, Optional
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
+from typing import Dict, List, Optional
 
 from twisted.test.proto_helpers import MemoryReactor
+from twisted.web.resource import Resource
 
 import synapse.rest.admin
 from synapse.api.errors import Codes
@@ -34,8 +42,6 @@ class UserMediaStatisticsTestCase(unittest.HomeserverTestCase):
     ]
 
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
-        self.media_repo = hs.get_media_repository_resource()
-
         self.admin_user = self.register_user("admin", "pass", admin=True)
         self.admin_user_tok = self.login("admin", "pass")
 
@@ -43,6 +49,11 @@ class UserMediaStatisticsTestCase(unittest.HomeserverTestCase):
         self.other_user_tok = self.login("user", "pass")
 
         self.url = "/_synapse/admin/v1/statistics/users/media"
+
+    def create_resource_dict(self) -> Dict[str, Resource]:
+        resources = super().create_resource_dict()
+        resources["/_matrix/media"] = self.hs.get_media_repository_resource()
+        return resources
 
     def test_no_auth(self) -> None:
         """
@@ -470,12 +481,9 @@ class UserMediaStatisticsTestCase(unittest.HomeserverTestCase):
             user_token: Access token of the user
             number_media: Number of media to be created for the user
         """
-        upload_resource = self.media_repo.children[b"upload"]
         for _ in range(number_media):
             # Upload some media into the room
-            self.helper.upload_media(
-                upload_resource, SMALL_PNG, tok=user_token, expect_code=200
-            )
+            self.helper.upload_media(SMALL_PNG, tok=user_token, expect_code=200)
 
     def _check_fields(self, content: List[JsonDict]) -> None:
         """Checks that all attributes are present in content

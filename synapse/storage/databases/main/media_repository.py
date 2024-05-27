@@ -1,23 +1,28 @@
-# Copyright 2014-2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020-2021 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
-    Any,
     Collection,
-    Dict,
     Iterable,
     List,
     Optional,
@@ -26,6 +31,11 @@ from typing import (
     cast,
 )
 
+import attr
+
+from synapse.api.constants import Direction
+from synapse.logging.opentracing import trace
+from synapse.media._base import ThumbnailInfo
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import (
     DatabasePool,
@@ -40,6 +50,40 @@ if TYPE_CHECKING:
 BG_UPDATE_REMOVE_MEDIA_REPO_INDEX_WITHOUT_METHOD_2 = (
     "media_repository_drop_index_wo_method_2"
 )
+
+
+@attr.s(slots=True, frozen=True, auto_attribs=True)
+class LocalMedia:
+    media_id: str
+    media_type: str
+    media_length: Optional[int]
+    upload_name: str
+    created_ts: int
+    url_cache: Optional[str]
+    last_access_ts: int
+    quarantined_by: Optional[str]
+    safe_from_quarantine: bool
+    user_id: Optional[str]
+
+
+@attr.s(slots=True, frozen=True, auto_attribs=True)
+class RemoteMedia:
+    media_origin: str
+    media_id: str
+    media_type: str
+    media_length: int
+    upload_name: Optional[str]
+    filesystem_id: str
+    created_ts: int
+    last_access_ts: int
+    quarantined_by: Optional[str]
+
+
+@attr.s(slots=True, frozen=True, auto_attribs=True)
+class UrlCache:
+    response_code: int
+    expires_ts: int
+    og: Union[str, bytes]
 
 
 class MediaSortOrder(Enum):
@@ -113,6 +157,13 @@ class MediaRepositoryBackgroundUpdateStore(SQLBaseStore):
             self._drop_media_index_without_method,
         )
 
+        if hs.config.media.can_load_media_repo:
+            self.unused_expiration_time: Optional[int] = (
+                hs.config.media.unused_expiration_time
+            )
+        else:
+            self.unused_expiration_time = None
+
     async def _drop_media_index_without_method(
         self, progress: JsonDict, batch_size: int
     ) -> int:
@@ -148,13 +199,13 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
         super().__init__(database, db_conn, hs)
         self.server_name: str = hs.hostname
 
-    async def get_local_media(self, media_id: str) -> Optional[Dict[str, Any]]:
+    async def get_local_media(self, media_id: str) -> Optional[LocalMedia]:
         """Get the metadata for a local piece of media
 
         Returns:
             None if the media_id doesn't exist.
         """
-        return await self.db_pool.simple_select_one(
+        row = await self.db_pool.simple_select_one(
             "local_media_repository",
             {"media_id": media_id},
             (
@@ -164,10 +215,26 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
                 "created_ts",
                 "quarantined_by",
                 "url_cache",
+                "last_access_ts",
                 "safe_from_quarantine",
+                "user_id",
             ),
             allow_none=True,
             desc="get_local_media",
+        )
+        if row is None:
+            return None
+        return LocalMedia(
+            media_id=media_id,
+            media_type=row[0],
+            media_length=row[1],
+            upload_name=row[2],
+            created_ts=row[3],
+            quarantined_by=row[4],
+            url_cache=row[5],
+            last_access_ts=row[6],
+            safe_from_quarantine=row[7],
+            user_id=row[8],
         )
 
     async def get_local_media_by_user_paginate(
@@ -176,8 +243,8 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
         limit: int,
         user_id: str,
         order_by: str = MediaSortOrder.CREATED_TS.value,
-        direction: str = "f",
-    ) -> Tuple[List[Dict[str, Any]], int]:
+        direction: Direction = Direction.FORWARDS,
+    ) -> Tuple[List[LocalMedia], int]:
         """Get a paginated list of metadata for a local piece of media
         which an user_id has uploaded
 
@@ -194,12 +261,11 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
 
         def get_local_media_by_user_paginate_txn(
             txn: LoggingTransaction,
-        ) -> Tuple[List[Dict[str, Any]], int]:
-
+        ) -> Tuple[List[LocalMedia], int]:
             # Set ordering
             order_by_column = MediaSortOrder(order_by).value
 
-            if direction == "b":
+            if direction == Direction.BACKWARDS:
                 order = "DESC"
             else:
                 order = "ASC"
@@ -215,14 +281,16 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
 
             sql = """
                 SELECT
-                    "media_id",
-                    "media_type",
-                    "media_length",
-                    "upload_name",
-                    "created_ts",
-                    "last_access_ts",
-                    "quarantined_by",
-                    "safe_from_quarantine"
+                    media_id,
+                    media_type,
+                    media_length,
+                    upload_name,
+                    created_ts,
+                    url_cache,
+                    last_access_ts,
+                    quarantined_by,
+                    safe_from_quarantine,
+                    user_id
                 FROM local_media_repository
                 WHERE user_id = ?
                 ORDER BY {order_by_column} {order}, media_id ASC
@@ -234,7 +302,21 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
 
             args += [limit, start]
             txn.execute(sql, args)
-            media = self.db_pool.cursor_to_dict(txn)
+            media = [
+                LocalMedia(
+                    media_id=row[0],
+                    media_type=row[1],
+                    media_length=row[2],
+                    upload_name=row[3],
+                    created_ts=row[4],
+                    url_cache=row[5],
+                    last_access_ts=row[6],
+                    quarantined_by=row[7],
+                    safe_from_quarantine=bool(row[8]),
+                    user_id=row[9],
+                )
+                for row in txn
+            ]
             return media, count
 
         return await self.db_pool.runInteraction(
@@ -328,6 +410,24 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
             "get_local_media_ids", _get_local_media_ids_txn
         )
 
+    @trace
+    async def store_local_media_id(
+        self,
+        media_id: str,
+        time_now_ms: int,
+        user_id: UserID,
+    ) -> None:
+        await self.db_pool.simple_insert(
+            "local_media_repository",
+            {
+                "media_id": media_id,
+                "created_ts": time_now_ms,
+                "user_id": user_id.to_string(),
+            },
+            desc="store_local_media_id",
+        )
+
+    @trace
     async def store_local_media(
         self,
         media_id: str,
@@ -352,6 +452,30 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
             desc="store_local_media",
         )
 
+    async def update_local_media(
+        self,
+        media_id: str,
+        media_type: str,
+        upload_name: Optional[str],
+        media_length: int,
+        user_id: UserID,
+        url_cache: Optional[str] = None,
+    ) -> None:
+        await self.db_pool.simple_update_one(
+            "local_media_repository",
+            keyvalues={
+                "user_id": user_id.to_string(),
+                "media_id": media_id,
+            },
+            updatevalues={
+                "media_type": media_type,
+                "upload_name": upload_name,
+                "media_length": media_length,
+                "url_cache": url_cache,
+            },
+            desc="update_local_media",
+        )
+
     async def mark_local_media_as_safe(self, media_id: str, safe: bool = True) -> None:
         """Mark a local media as safe or unsafe from quarantining."""
         await self.db_pool.simple_update_one(
@@ -361,51 +485,72 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
             desc="mark_local_media_as_safe",
         )
 
-    async def get_url_cache(self, url: str, ts: int) -> Optional[Dict[str, Any]]:
+    async def count_pending_media(self, user_id: UserID) -> Tuple[int, int]:
+        """Count the number of pending media for a user.
+
+        Returns:
+            A tuple of two integers: the total pending media requests and the earliest
+            expiration timestamp.
+        """
+
+        def get_pending_media_txn(txn: LoggingTransaction) -> Tuple[int, int]:
+            sql = """
+            SELECT COUNT(*), MIN(created_ts)
+            FROM local_media_repository
+            WHERE user_id = ?
+                AND created_ts > ?
+                AND media_length IS NULL
+            """
+            assert self.unused_expiration_time is not None
+            txn.execute(
+                sql,
+                (
+                    user_id.to_string(),
+                    self._clock.time_msec() - self.unused_expiration_time,
+                ),
+            )
+            row = txn.fetchone()
+            if not row:
+                return 0, 0
+            return row[0], (row[1] + self.unused_expiration_time if row[1] else 0)
+
+        return await self.db_pool.runInteraction(
+            "get_pending_media", get_pending_media_txn
+        )
+
+    async def get_url_cache(self, url: str, ts: int) -> Optional[UrlCache]:
         """Get the media_id and ts for a cached URL as of the given timestamp
         Returns:
             None if the URL isn't cached.
         """
 
-        def get_url_cache_txn(txn: LoggingTransaction) -> Optional[Dict[str, Any]]:
+        def get_url_cache_txn(txn: LoggingTransaction) -> Optional[UrlCache]:
             # get the most recently cached result (relative to the given ts)
-            sql = (
-                "SELECT response_code, etag, expires_ts, og, media_id, download_ts"
-                " FROM local_media_repository_url_cache"
-                " WHERE url = ? AND download_ts <= ?"
-                " ORDER BY download_ts DESC LIMIT 1"
-            )
+            sql = """
+                SELECT response_code, expires_ts, og
+                FROM local_media_repository_url_cache
+                WHERE url = ? AND download_ts <= ?
+                ORDER BY download_ts DESC LIMIT 1
+            """
             txn.execute(sql, (url, ts))
             row = txn.fetchone()
 
             if not row:
                 # ...or if we've requested a timestamp older than the oldest
                 # copy in the cache, return the oldest copy (if any)
-                sql = (
-                    "SELECT response_code, etag, expires_ts, og, media_id, download_ts"
-                    " FROM local_media_repository_url_cache"
-                    " WHERE url = ? AND download_ts > ?"
-                    " ORDER BY download_ts ASC LIMIT 1"
-                )
+                sql = """
+                    SELECT response_code, expires_ts, og
+                    FROM local_media_repository_url_cache
+                    WHERE url = ? AND download_ts > ?
+                    ORDER BY download_ts ASC LIMIT 1
+                """
                 txn.execute(sql, (url, ts))
                 row = txn.fetchone()
 
             if not row:
                 return None
 
-            return dict(
-                zip(
-                    (
-                        "response_code",
-                        "etag",
-                        "expires_ts",
-                        "og",
-                        "media_id",
-                        "download_ts",
-                    ),
-                    row,
-                )
-            )
+            return UrlCache(response_code=row[0], expires_ts=row[1], og=row[2])
 
         return await self.db_pool.runInteraction("get_url_cache", get_url_cache_txn)
 
@@ -415,7 +560,7 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
         response_code: int,
         etag: Optional[str],
         expires_ts: int,
-        og: Optional[str],
+        og: str,
         media_id: str,
         download_ts: int,
     ) -> None:
@@ -433,20 +578,30 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
             desc="store_url_cache",
         )
 
-    async def get_local_media_thumbnails(self, media_id: str) -> List[Dict[str, Any]]:
-        return await self.db_pool.simple_select_list(
-            "local_media_repository_thumbnails",
-            {"media_id": media_id},
-            (
-                "thumbnail_width",
-                "thumbnail_height",
-                "thumbnail_method",
-                "thumbnail_type",
-                "thumbnail_length",
+    async def get_local_media_thumbnails(self, media_id: str) -> List[ThumbnailInfo]:
+        rows = cast(
+            List[Tuple[int, int, str, str, int]],
+            await self.db_pool.simple_select_list(
+                "local_media_repository_thumbnails",
+                {"media_id": media_id},
+                (
+                    "thumbnail_width",
+                    "thumbnail_height",
+                    "thumbnail_method",
+                    "thumbnail_type",
+                    "thumbnail_length",
+                ),
+                desc="get_local_media_thumbnails",
             ),
-            desc="get_local_media_thumbnails",
         )
+        return [
+            ThumbnailInfo(
+                width=row[0], height=row[1], method=row[2], type=row[3], length=row[4]
+            )
+            for row in rows
+        ]
 
+    @trace
     async def store_local_thumbnail(
         self,
         media_id: str,
@@ -471,8 +626,8 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
 
     async def get_cached_remote_media(
         self, origin: str, media_id: str
-    ) -> Optional[Dict[str, Any]]:
-        return await self.db_pool.simple_select_one(
+    ) -> Optional[RemoteMedia]:
+        row = await self.db_pool.simple_select_one(
             "remote_media_cache",
             {"media_origin": origin, "media_id": media_id},
             (
@@ -481,10 +636,24 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
                 "upload_name",
                 "created_ts",
                 "filesystem_id",
+                "last_access_ts",
                 "quarantined_by",
             ),
             allow_none=True,
             desc="get_cached_remote_media",
+        )
+        if row is None:
+            return row
+        return RemoteMedia(
+            media_origin=origin,
+            media_id=media_id,
+            media_type=row[0],
+            media_length=row[1],
+            upload_name=row[2],
+            created_ts=row[3],
+            filesystem_id=row[4],
+            last_access_ts=row[5],
+            quarantined_by=row[6],
         )
 
     async def store_cached_remote_media(
@@ -553,21 +722,30 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
 
     async def get_remote_media_thumbnails(
         self, origin: str, media_id: str
-    ) -> List[Dict[str, Any]]:
-        return await self.db_pool.simple_select_list(
-            "remote_media_cache_thumbnails",
-            {"media_origin": origin, "media_id": media_id},
-            (
-                "thumbnail_width",
-                "thumbnail_height",
-                "thumbnail_method",
-                "thumbnail_type",
-                "thumbnail_length",
-                "filesystem_id",
+    ) -> List[ThumbnailInfo]:
+        rows = cast(
+            List[Tuple[int, int, str, str, int]],
+            await self.db_pool.simple_select_list(
+                "remote_media_cache_thumbnails",
+                {"media_origin": origin, "media_id": media_id},
+                (
+                    "thumbnail_width",
+                    "thumbnail_height",
+                    "thumbnail_method",
+                    "thumbnail_type",
+                    "thumbnail_length",
+                ),
+                desc="get_remote_media_thumbnails",
             ),
-            desc="get_remote_media_thumbnails",
         )
+        return [
+            ThumbnailInfo(
+                width=row[0], height=row[1], method=row[2], type=row[3], length=row[4]
+            )
+            for row in rows
+        ]
 
+    @trace
     async def get_remote_media_thumbnail(
         self,
         origin: str,
@@ -575,10 +753,10 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
         t_width: int,
         t_height: int,
         t_type: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[ThumbnailInfo]:
         """Fetch the thumbnail info of given width, height and type."""
 
-        return await self.db_pool.simple_select_one(
+        row = await self.db_pool.simple_select_one(
             table="remote_media_cache_thumbnails",
             keyvalues={
                 "media_origin": origin,
@@ -593,12 +771,17 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
                 "thumbnail_method",
                 "thumbnail_type",
                 "thumbnail_length",
-                "filesystem_id",
             ),
             allow_none=True,
             desc="get_remote_media_thumbnail",
         )
+        if row is None:
+            return None
+        return ThumbnailInfo(
+            width=row[0], height=row[1], method=row[2], type=row[3], length=row[4]
+        )
 
+    @trace
     async def store_remote_media_thumbnail(
         self,
         origin: str,
@@ -627,7 +810,7 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
 
     async def get_remote_media_ids(
         self, before_ts: int, include_quarantined_media: bool
-    ) -> List[Dict[str, str]]:
+    ) -> List[Tuple[str, str, str]]:
         """
         Retrieve a list of server name, media ID tuples from the remote media cache.
 
@@ -641,12 +824,14 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
             A list of tuples containing:
                 * The server name of homeserver where the media originates from,
                 * The ID of the media.
+                * The filesystem ID.
         """
-        sql = (
-            "SELECT media_origin, media_id, filesystem_id"
-            " FROM remote_media_cache"
-            " WHERE last_access_ts < ?"
-        )
+
+        sql = """
+        SELECT media_origin, media_id, filesystem_id
+        FROM remote_media_cache
+        WHERE last_access_ts < ?
+        """
 
         if include_quarantined_media is False:
             # Only include media that has not been quarantined
@@ -654,8 +839,9 @@ class MediaRepositoryStore(MediaRepositoryBackgroundUpdateStore):
             AND quarantined_by IS NULL
             """
 
-        return await self.db_pool.execute(
-            "get_remote_media_ids", self.db_pool.cursor_to_dict, sql, before_ts
+        return cast(
+            List[Tuple[str, str, str]],
+            await self.db_pool.execute("get_remote_media_ids", sql, before_ts),
         )
 
     async def delete_remote_media(self, media_origin: str, media_id: str) -> None:

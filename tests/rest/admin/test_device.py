@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 Dirk Klimpel
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import urllib.parse
 
 from parameterized import parameterized
@@ -28,7 +35,6 @@ from tests import unittest
 
 
 class DeviceRestTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         synapse.rest.admin.register_servlets,
         login.register_servlets,
@@ -291,7 +297,6 @@ class DeviceRestTestCase(unittest.HomeserverTestCase):
 
 
 class DevicesRestTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         synapse.rest.admin.register_servlets,
         login.register_servlets,
@@ -415,7 +420,6 @@ class DevicesRestTestCase(unittest.HomeserverTestCase):
 
 
 class DeleteDevicesRestTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         synapse.rest.admin.register_servlets,
         login.register_servlets,

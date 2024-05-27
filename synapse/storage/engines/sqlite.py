@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import platform
 import sqlite3
 import struct
@@ -32,6 +39,13 @@ class Sqlite3Engine(BaseDatabaseEngine[sqlite3.Connection, sqlite3.Cursor]):
         self._is_in_memory = database in (
             None,
             ":memory:",
+        )
+
+        # A connection to a database that has already been prepared, to use as a
+        # base for an in-memory connection. This is used during unit tests to
+        # speed up setting up the DB.
+        self._prepped_conn: Optional[sqlite3.Connection] = database_config.get(
+            "_TEST_PREPPED_CONN"
         )
 
         if platform.python_implementation() == "PyPy":
@@ -84,7 +98,15 @@ class Sqlite3Engine(BaseDatabaseEngine[sqlite3.Connection, sqlite3.Cursor]):
             # In memory databases need to be rebuilt each time. Ideally we'd
             # reuse the same connection as we do when starting up, but that
             # would involve using adbapi before we have started the reactor.
-            prepare_database(db_conn, self, config=None)
+            #
+            # If we have a `prepped_conn` we can use that to initialise the DB,
+            # otherwise we need to call `prepare_database`.
+            if self._prepped_conn is not None:
+                # Initialise the new DB from the pre-prepared DB.
+                assert isinstance(db_conn.conn, sqlite3.Connection)
+                self._prepped_conn.backup(db_conn.conn)
+            else:
+                prepare_database(db_conn, self, config=None)
 
         db_conn.create_function("rank", 1, _rank)
         db_conn.execute("PRAGMA foreign_keys = ON;")
@@ -107,6 +129,10 @@ class Sqlite3Engine(BaseDatabaseEngine[sqlite3.Connection, sqlite3.Cursor]):
     def server_version(self) -> str:
         """Gets a string giving the server version. For example: '3.22.0'."""
         return "%i.%i.%i" % sqlite3.sqlite_version_info
+
+    @property
+    def row_id_name(self) -> str:
+        return "rowid"
 
     def in_transaction(self, conn: sqlite3.Connection) -> bool:
         return conn.in_transaction
@@ -135,13 +161,16 @@ class Sqlite3Engine(BaseDatabaseEngine[sqlite3.Connection, sqlite3.Cursor]):
         > than one statement with it, it will raise a Warning. Use executescript() if
         > you want to execute multiple SQL statements with one call.
 
-        Though the docs for `executescript` warn:
+        The script is prefixed with a `BEGIN TRANSACTION`, since the docs for
+        `executescript` warn:
 
         > If there is a pending transaction, an implicit COMMIT statement is executed
         > first. No other implicit transaction control is performed; any transaction
         > control must be added to sql_script.
         """
-        cursor.executescript(script)
+        # The implementation of `executescript` can be found at
+        # https://github.com/python/cpython/blob/3.11/Modules/_sqlite/cursor.c#L1035.
+        cursor.executescript(f"BEGIN TRANSACTION; {script}")
 
 
 # Following functions taken from: https://github.com/coleifer/peewee

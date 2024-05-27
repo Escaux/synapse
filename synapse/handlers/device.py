@@ -1,32 +1,26 @@
-# Copyright 2016 OpenMarket Ltd
-# Copyright 2019 New Vector Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019,2020 The Matrix.org Foundation C.I.C.
+# Copyright 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
-from http import HTTPStatus
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Collection,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Set,
-    Tuple,
-)
+from typing import TYPE_CHECKING, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from synapse.api import errors
 from synapse.api.constants import EduTypes, EventTypes
@@ -43,10 +37,15 @@ from synapse.metrics.background_process_metrics import (
     run_as_background_process,
     wrap_as_background_process,
 )
+from synapse.storage.databases.main.client_ips import DeviceLastConnectionInfo
 from synapse.types import (
     JsonDict,
+    JsonMapping,
+    ScheduledTask,
+    StrCollection,
     StreamKeyType,
     StreamToken,
+    TaskStatus,
     UserID,
     get_domain_from_id,
     get_verify_key_from_cross_signing_key,
@@ -56,13 +55,17 @@ from synapse.util.async_helpers import Linearizer
 from synapse.util.caches.expiringcache import ExpiringCache
 from synapse.util.cancellation import cancellable
 from synapse.util.metrics import measure_func
-from synapse.util.retryutils import NotRetryingDestination
+from synapse.util.retryutils import (
+    NotRetryingDestination,
+    filter_destinations_by_retry_limiter,
+)
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
+DELETE_DEVICE_MSGS_TASK_NAME = "delete_device_messages"
 MAX_DEVICE_DISPLAY_NAME_LEN = 100
 DELETE_STALE_DEVICES_INTERVAL_MS = 24 * 60 * 60 * 1000
 
@@ -76,12 +79,22 @@ class DeviceWorkerHandler:
         self.store = hs.get_datastores().main
         self.notifier = hs.get_notifier()
         self.state = hs.get_state_handler()
+        self._appservice_handler = hs.get_application_service_handler()
         self._state_storage = hs.get_storage_controllers().state
         self._auth_handler = hs.get_auth_handler()
+        self._event_sources = hs.get_event_sources()
         self.server_name = hs.hostname
         self._msc3852_enabled = hs.config.experimental.msc3852_enabled
+        self._query_appservices_for_keys = (
+            hs.config.experimental.msc3984_appservice_key_query
+        )
+        self._task_scheduler = hs.get_task_scheduler()
 
         self.device_list_updater = DeviceListWorkerUpdater(hs)
+
+        self._task_scheduler.register_action(
+            self._delete_device_messages, DELETE_DEVICE_MSGS_TASK_NAME
+        )
 
     @trace
     async def get_devices_by_user(self, user_id: str) -> List[JsonDict]:
@@ -146,7 +159,7 @@ class DeviceWorkerHandler:
 
     @cancellable
     async def get_device_changes_in_shared_rooms(
-        self, user_id: str, room_ids: Collection[str], from_token: StreamToken
+        self, user_id: str, room_ids: StrCollection, from_token: StreamToken
     ) -> Set[str]:
         """Get the set of users whose devices have changed who share a room with
         the given user.
@@ -215,6 +228,16 @@ class DeviceWorkerHandler:
         possibly_changed = set(changed)
         possibly_left = set()
         for room_id in rooms_changed:
+            # Check if the forward extremities have changed. If not then we know
+            # the current state won't have changed, and so we can skip this room.
+            try:
+                if not await self.store.have_room_forward_extremities_changed_since(
+                    room_id, stream_ordering
+                ):
+                    continue
+            except errors.StoreError:
+                pass
+
             current_state_ids = await self._state_storage.get_current_state_ids(
                 room_id, await_full_state=False
             )
@@ -311,6 +334,9 @@ class DeviceWorkerHandler:
         return result
 
     async def on_federation_query_user_devices(self, user_id: str) -> JsonDict:
+        if not self.hs.is_mine(UserID.from_string(user_id)):
+            raise SynapseError(400, "User is not hosted on this homeserver")
+
         stream_id, devices = await self.store.get_e2e_device_keys_for_federation_query(
             user_id
         )
@@ -318,6 +344,30 @@ class DeviceWorkerHandler:
         self_signing_key = await self.store.get_e2e_cross_signing_key(
             user_id, "self_signing"
         )
+
+        # Check if the application services have any results.
+        if self._query_appservices_for_keys:
+            # Query the appservice for all devices for this user.
+            query: Dict[str, Optional[List[str]]] = {user_id: None}
+
+            # Query the appservices for any keys.
+            appservice_results = await self._appservice_handler.query_keys(query)
+
+            # Merge results, overriding anything from the database.
+            appservice_devices = appservice_results.get("device_keys", {}).get(
+                user_id, {}
+            )
+
+            # Filter the database results to only those devices that the appservice has
+            # *not* responded with.
+            devices = [d for d in devices if d["device_id"] not in appservice_devices]
+            # Append the appservice response by wrapping each result in another dictionary.
+            devices.extend(
+                {"device_id": device_id, "keys": device}
+                for device_id, device in appservice_devices.items()
+            )
+
+            # TODO Handle cross-signing keys.
 
         return {
             "user_id": user_id,
@@ -338,6 +388,35 @@ class DeviceWorkerHandler:
             "Trying handling device list state for partial join: not supported on workers."
         )
 
+    DEVICE_MSGS_DELETE_BATCH_LIMIT = 1000
+    DEVICE_MSGS_DELETE_SLEEP_MS = 100
+
+    async def _delete_device_messages(
+        self,
+        task: ScheduledTask,
+    ) -> Tuple[TaskStatus, Optional[JsonMapping], Optional[str]]:
+        """Scheduler task to delete device messages in batch of `DEVICE_MSGS_DELETE_BATCH_LIMIT`."""
+        assert task.params is not None
+        user_id = task.params["user_id"]
+        device_id = task.params["device_id"]
+        up_to_stream_id = task.params["up_to_stream_id"]
+
+        # Delete the messages in batches to avoid too much DB load.
+        from_stream_id = None
+        while True:
+            from_stream_id, _ = await self.store.delete_messages_for_device_between(
+                user_id=user_id,
+                device_id=device_id,
+                from_stream_id=from_stream_id,
+                to_stream_id=up_to_stream_id,
+                limit=DeviceHandler.DEVICE_MSGS_DELETE_BATCH_LIMIT,
+            )
+
+            if from_stream_id is None:
+                return TaskStatus.COMPLETE, None, None
+
+            await self.clock.sleep(DeviceHandler.DEVICE_MSGS_DELETE_SLEEP_MS / 1000.0)
+
 
 class DeviceHandler(DeviceWorkerHandler):
     device_list_updater: "DeviceListUpdater"
@@ -346,7 +425,13 @@ class DeviceHandler(DeviceWorkerHandler):
         super().__init__(hs)
 
         self.federation_sender = hs.get_federation_sender()
+        self._account_data_handler = hs.get_account_data_handler()
         self._storage_controllers = hs.get_storage_controllers()
+        self.db_pool = hs.get_datastores().main.db_pool
+
+        self._dont_notify_new_devices_for = (
+            hs.config.registration.dont_notify_new_devices_for
+        )
 
         self.device_list_updater = DeviceListUpdater(hs, self)
 
@@ -424,6 +509,9 @@ class DeviceHandler(DeviceWorkerHandler):
 
         self._check_device_name_length(initial_device_display_name)
 
+        # Check if we should send out device lists updates for this new device.
+        notify = user_id not in self._dont_notify_new_devices_for
+
         if device_id is not None:
             new_device = await self.store.store_device(
                 user_id=user_id,
@@ -433,7 +521,8 @@ class DeviceHandler(DeviceWorkerHandler):
                 auth_provider_session_id=auth_provider_session_id,
             )
             if new_device:
-                await self.notify_device_update(user_id, [device_id])
+                if notify:
+                    await self.notify_device_update(user_id, [device_id])
             return device_id
 
         # if the device id is not specified, we'll autogen one, but loop a few
@@ -449,7 +538,8 @@ class DeviceHandler(DeviceWorkerHandler):
                 auth_provider_session_id=auth_provider_session_id,
             )
             if new_device:
-                await self.notify_device_update(user_id, [new_device_id])
+                if notify:
+                    await self.notify_device_update(user_id, [new_device_id])
                 return new_device_id
             attempts += 1
 
@@ -491,6 +581,7 @@ class DeviceHandler(DeviceWorkerHandler):
             user_id: The user to delete devices from.
             device_ids: The list of device IDs to delete
         """
+        to_device_stream_id = self._event_sources.get_current_token().to_device_key
 
         try:
             await self.store.delete_devices(user_id, device_ids)
@@ -502,7 +593,7 @@ class DeviceHandler(DeviceWorkerHandler):
             else:
                 raise
 
-        # Delete access tokens and e2e keys for each device. Not optimised as it is not
+        # Delete data specific to each device. Not optimised as it is not
         # considered as part of a critical path.
         for device_id in device_ids:
             await self._auth_handler.delete_access_tokens_for_user(
@@ -511,6 +602,31 @@ class DeviceHandler(DeviceWorkerHandler):
             await self.store.delete_e2e_keys_by_device(
                 user_id=user_id, device_id=device_id
             )
+
+            if self.hs.config.experimental.msc3890_enabled:
+                # Remove any local notification settings for this device in accordance
+                # with MSC3890.
+                await self._account_data_handler.remove_account_data_for_user(
+                    user_id,
+                    f"org.matrix.msc3890.local_notification_settings.{device_id}",
+                )
+
+            # Delete device messages asynchronously and in batches using the task scheduler
+            # We specify an upper stream id to avoid deleting non delivered messages
+            # if an user re-uses a device ID.
+            await self._task_scheduler.schedule_task(
+                DELETE_DEVICE_MSGS_TASK_NAME,
+                resource_id=device_id,
+                params={
+                    "user_id": user_id,
+                    "device_id": device_id,
+                    "up_to_stream_id": to_device_stream_id,
+                },
+            )
+
+        # Pushers are deleted after `delete_access_tokens_for_user` is called so that
+        # modules using `on_logged_out` hook can use them if needed.
+        await self.hs.get_pusherpool().remove_pushers_by_devices(user_id, device_ids)
 
         await self.notify_device_update(user_id, device_ids)
 
@@ -542,7 +658,7 @@ class DeviceHandler(DeviceWorkerHandler):
     @trace
     @measure_func("notify_device_update")
     async def notify_device_update(
-        self, user_id: str, device_ids: Collection[str]
+        self, user_id: str, device_ids: StrCollection
     ) -> None:
         """Notify that a user's device(s) has changed. Pokes the notifier, and
         remote servers if the user is local.
@@ -603,29 +719,38 @@ class DeviceHandler(DeviceWorkerHandler):
     async def store_dehydrated_device(
         self,
         user_id: str,
+        device_id: Optional[str],
         device_data: JsonDict,
         initial_device_display_name: Optional[str] = None,
+        keys_for_device: Optional[JsonDict] = None,
     ) -> str:
-        """Store a dehydrated device for a user.  If the user had a previous
-        dehydrated device, it is removed.
+        """Store a dehydrated device for a user, optionally storing the keys associated with
+        it as well.  If the user had a previous dehydrated device, it is removed.
 
         Args:
             user_id: the user that we are storing the device for
+            device_id: device id supplied by client
             device_data: the dehydrated device information
             initial_device_display_name: The display name to use for the device
+            keys_for_device: keys for the dehydrated device
         Returns:
             device id of the dehydrated device
         """
         device_id = await self.check_device_registered(
             user_id,
-            None,
+            device_id,
             initial_device_display_name,
         )
+
+        time_now = self.clock.time_msec()
+
         old_device_id = await self.store.store_dehydrated_device(
-            user_id, device_id, device_data
+            user_id, device_id, device_data, time_now, keys_for_device
         )
+
         if old_device_id is not None:
             await self.delete_devices(user_id, [old_device_id])
+
         return device_id
 
     async def rehydrate_device(
@@ -647,12 +772,13 @@ class DeviceHandler(DeviceWorkerHandler):
 
         # If the dehydrated device was successfully deleted (the device ID
         # matched the stored dehydrated device), then modify the access
-        # token to use the dehydrated device's ID and copy the old device
-        # display name to the dehydrated device, and destroy the old device
-        # ID
+        # token and refresh token to use the dehydrated device's ID and
+        # copy the old device display name to the dehydrated device,
+        # and destroy the old device ID
         old_device_id = await self.store.set_device_for_access_token(
             access_token, device_id
         )
+        await self.store.set_device_for_refresh_token(user_id, old_device_id, device_id)
         old_device = await self.store.get_device(user_id, old_device_id)
         if old_device is None:
             raise errors.NotFoundError()
@@ -669,6 +795,22 @@ class DeviceHandler(DeviceWorkerHandler):
         await self.notify_device_update(user_id, [old_device_id, device_id])
 
         return {"success": True}
+
+    async def delete_dehydrated_device(self, user_id: str, device_id: str) -> None:
+        """
+        Delete a stored dehydrated device.
+
+        Args:
+            user_id: the user_id to delete the device from
+            device_id: id of the dehydrated device to delete
+        """
+        success = await self.store.remove_dehydrated_device(user_id, device_id)
+
+        if not success:
+            raise errors.NotFoundError()
+
+        await self.delete_devices(user_id, [device_id])
+        await self.store.delete_e2e_keys_by_device(user_id=user_id, device_id=device_id)
 
     @wrap_as_background_process("_handle_new_device_update_async")
     async def _handle_new_device_update_async(self) -> None:
@@ -716,7 +858,6 @@ class DeviceHandler(DeviceWorkerHandler):
                     else:
                         assert max_stream_id == stream_id
                         # Avoid moving `room_id` backwards.
-                        pass
 
                     if self._handle_new_device_update_new_data:
                         continue
@@ -760,17 +901,16 @@ class DeviceHandler(DeviceWorkerHandler):
                             user_id,
                             hosts,
                         )
-                        for host in hosts:
-                            self.federation_sender.send_device_messages(
-                                host, immediate=False
-                            )
-                            # TODO: when called, this isn't in a logging context.
-                            # This leads to log spam, sentry event spam, and massive
-                            # memory usage.
-                            # See https://github.com/matrix-org/synapse/issues/12552.
-                            # log_kv(
-                            #     {"message": "sent device update to host", "host": host}
-                            # )
+                        await self.federation_sender.send_device_messages(
+                            hosts, immediate=False
+                        )
+                        # TODO: when called, this isn't in a logging context.
+                        # This leads to log spam, sentry event spam, and massive
+                        # memory usage.
+                        # See https://github.com/matrix-org/synapse/issues/12552.
+                        # log_kv(
+                        #     {"message": "sent device update to host", "host": host}
+                        # )
 
                     if current_stream_id != stream_id:
                         # Clear the set of hosts we've already sent to as we're
@@ -850,6 +990,7 @@ class DeviceHandler(DeviceWorkerHandler):
         known_hosts_at_join = await self.store.get_partial_state_servers_at_join(
             room_id
         )
+        assert known_hosts_at_join is not None
         potentially_changed_hosts.difference_update(known_hosts_at_join)
 
         potentially_changed_hosts.discard(self.server_name)
@@ -874,19 +1015,20 @@ class DeviceHandler(DeviceWorkerHandler):
 
         # Notify things that device lists need to be sent out.
         self.notifier.notify_replication()
-        for host in potentially_changed_hosts:
-            self.federation_sender.send_device_messages(host, immediate=False)
+        await self.federation_sender.send_device_messages(
+            potentially_changed_hosts, immediate=False
+        )
 
 
 def _update_device_from_client_ips(
-    device: JsonDict, client_ips: Mapping[Tuple[str, str], Mapping[str, Any]]
+    device: JsonDict, client_ips: Mapping[Tuple[str, str], DeviceLastConnectionInfo]
 ) -> None:
-    ip = client_ips.get((device["user_id"], device["device_id"]), {})
+    ip = client_ips.get((device["user_id"], device["device_id"]))
     device.update(
         {
-            "last_seen_user_agent": ip.get("user_agent"),
-            "last_seen_ts": ip.get("last_seen"),
-            "last_seen_ip": ip.get("ip"),
+            "last_seen_user_agent": ip.user_agent if ip else None,
+            "last_seen_ts": ip.last_seen if ip else None,
+            "last_seen_ip": ip.ip if ip else None,
         }
     )
 
@@ -897,19 +1039,15 @@ class DeviceListWorkerUpdater:
     def __init__(self, hs: "HomeServer"):
         from synapse.replication.http.devices import (
             ReplicationMultiUserDevicesResyncRestServlet,
-            ReplicationUserDevicesResyncRestServlet,
         )
 
-        self._user_device_resync_client = (
-            ReplicationUserDevicesResyncRestServlet.make_client(hs)
-        )
         self._multi_user_device_resync_client = (
             ReplicationMultiUserDevicesResyncRestServlet.make_client(hs)
         )
 
     async def multi_user_device_resync(
         self, user_ids: List[str], mark_failed_as_stale: bool = True
-    ) -> Dict[str, Optional[JsonDict]]:
+    ) -> Dict[str, Optional[JsonMapping]]:
         """
         Like `user_device_resync` but operates on multiple users **from the same origin**
         at once.
@@ -924,37 +1062,7 @@ class DeviceListWorkerUpdater:
             # Shortcut empty requests
             return {}
 
-        try:
-            return await self._multi_user_device_resync_client(user_ids=user_ids)
-        except SynapseError as err:
-            if not (
-                err.code == HTTPStatus.NOT_FOUND and err.errcode == Codes.UNRECOGNIZED
-            ):
-                raise
-
-            # Fall back to single requests
-            result: Dict[str, Optional[JsonDict]] = {}
-            for user_id in user_ids:
-                result[user_id] = await self._user_device_resync_client(user_id=user_id)
-            return result
-
-    async def user_device_resync(
-        self, user_id: str, mark_failed_as_stale: bool = True
-    ) -> Optional[JsonDict]:
-        """Fetches all devices for a user and updates the device cache with them.
-
-        Args:
-            user_id: The user's id whose device_list will be updated.
-            mark_failed_as_stale: Whether to mark the user's device list as stale
-                if the attempt to resync failed.
-        Returns:
-            A dict with device info as under the "devices" in the result of this
-            request:
-            https://matrix.org/docs/spec/server_server/r0.1.2#get-matrix-federation-v1-user-devices-userid
-            None when we weren't able to fetch the device info for some reason,
-            e.g. due to a connection problem.
-        """
-        return (await self.multi_user_device_resync([user_id]))[user_id]
+        return await self._multi_user_device_resync_client(user_ids=user_ids)
 
 
 class DeviceListUpdater(DeviceListWorkerUpdater):
@@ -965,8 +1073,10 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
         self.federation = hs.get_federation_client()
         self.clock = hs.get_clock()
         self.device_handler = device_handler
+        self._notifier = hs.get_notifier()
 
         self._remote_edu_linearizer = Linearizer(name="remote_device_list")
+        self._resync_linearizer = Linearizer(name="remote_device_resync")
 
         # user_id -> list of updates waiting to be handled.
         self._pending_updates: Dict[
@@ -1045,6 +1155,7 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
                 user_id,
                 device_id,
             )
+            self._notifier.notify_replication()
 
         room_ids = await self.store.get_rooms_for_user(user_id)
         if not room_ids:
@@ -1105,7 +1216,14 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
                 )
 
             if resync:
-                await self.user_device_resync(user_id)
+                # We mark as stale up front in case we get restarted.
+                await self.store.mark_remote_users_device_caches_as_stale([user_id])
+                run_as_background_process(
+                    "_maybe_retry_device_resync",
+                    self.multi_user_device_resync,
+                    [user_id],
+                    False,
+                )
             else:
                 # Simply update the single device, since we know that is the only
                 # change (because of the single prev_id matching the current cache)
@@ -1168,14 +1286,23 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
             self._resync_retry_in_progress = True
             # Get all of the users that need resyncing.
             need_resync = await self.store.get_user_ids_requiring_device_list_resync()
+
+            # Filter out users whose host is marked as "down" up front.
+            hosts = await filter_destinations_by_retry_limiter(
+                {get_domain_from_id(u) for u in need_resync}, self.clock, self.store
+            )
+            hosts = set(hosts)
+
             # Iterate over the set of user IDs.
             for user_id in need_resync:
+                if get_domain_from_id(user_id) not in hosts:
+                    continue
+
                 try:
                     # Try to resync the current user's devices list.
-                    result = await self.user_device_resync(
-                        user_id=user_id,
-                        mark_failed_as_stale=False,
-                    )
+                    result = (await self.multi_user_device_resync([user_id], False))[
+                        user_id
+                    ]
 
                     # user_device_resync only returns a result if it managed to
                     # successfully resync and update the database. Updating the table
@@ -1202,7 +1329,7 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
 
     async def multi_user_device_resync(
         self, user_ids: List[str], mark_failed_as_stale: bool = True
-    ) -> Dict[str, Optional[JsonDict]]:
+    ) -> Dict[str, Optional[JsonMapping]]:
         """
         Like `user_device_resync` but operates on multiple users **from the same origin**
         at once.
@@ -1222,9 +1349,11 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
         failed = set()
         # TODO(Perf): Actually batch these up
         for user_id in user_ids:
-            user_result, user_failed = await self._user_device_resync_returning_failed(
-                user_id
-            )
+            async with self._resync_linearizer.queue(user_id):
+                (
+                    user_result,
+                    user_failed,
+                ) = await self._user_device_resync_returning_failed(user_id)
             result[user_id] = user_result
             if user_failed:
                 failed.add(user_id)
@@ -1234,21 +1363,9 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
 
         return result
 
-    async def user_device_resync(
-        self, user_id: str, mark_failed_as_stale: bool = True
-    ) -> Optional[JsonDict]:
-        result, failed = await self._user_device_resync_returning_failed(user_id)
-
-        if failed and mark_failed_as_stale:
-            # Mark the remote user's device list as stale so we know we need to retry
-            # it later.
-            await self.store.mark_remote_users_device_caches_as_stale((user_id,))
-
-        return result
-
     async def _user_device_resync_returning_failed(
         self, user_id: str
-    ) -> Tuple[Optional[JsonDict], bool]:
+    ) -> Tuple[Optional[JsonMapping], bool]:
         """Fetches all devices for a user and updates the device cache with them.
 
         Args:
@@ -1261,6 +1378,12 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
               e.g. due to a connection problem.
             - True iff the resync failed and the device list should be marked as stale.
         """
+        # Check that we haven't gone and fetched the devices since we last
+        # checked if we needed to resync these device lists.
+        if await self.store.get_users_whose_devices_are_cached([user_id]):
+            cached = await self.store.get_cached_devices_for_user(user_id)
+            return cached, False
+
         logger.debug("Attempting to resync the device list for %s", user_id)
         log_kv({"message": "Doing resync to update device list."})
         # Fetch all devices for the user.

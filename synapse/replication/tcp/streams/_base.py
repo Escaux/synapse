@@ -1,17 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2017 Vector Creations Ltd
-# Copyright 2019 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import heapq
 import logging
@@ -28,11 +34,12 @@ from typing import (
 
 import attr
 
+from synapse.api.constants import AccountDataTypes
 from synapse.replication.http.streams import ReplicationGetStreamUpdates
-from synapse.types import JsonDict
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
+    from synapse.storage.util.id_generators import AbstractStreamIdGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -107,21 +114,9 @@ class Stream:
     def __init__(
         self,
         local_instance_name: str,
-        current_token_function: Callable[[str], Token],
         update_function: UpdateFunction,
     ):
         """Instantiate a Stream
-
-        `current_token_function` and `update_function` are callbacks which
-        should be implemented by subclasses.
-
-        `current_token_function` takes an instance name, which is a writer to
-        the stream, and returns the position in the stream of the writer (as
-        viewed from the current process). On the writer process this is where
-        the writer has successfully written up to, whereas on other processes
-        this is the position which we have received updates up to over
-        replication. (Note that most streams have a single writer and so their
-        implementations ignore the instance name passed in).
 
         `update_function` is called to get updates for this stream between a
         pair of stream tokens. See the `UpdateFunction` type definition for more
@@ -133,11 +128,37 @@ class Stream:
             update_function: callback go get stream updates, as above
         """
         self.local_instance_name = local_instance_name
-        self.current_token = current_token_function
         self.update_function = update_function
 
         # The token from which we last asked for updates
         self.last_token = self.current_token(self.local_instance_name)
+
+    def current_token(self, instance_name: str) -> Token:
+        """This takes an instance name, which is a writer to
+        the stream, and returns the position in the stream of the writer (as
+        viewed from the current process).
+        """
+        # We can't make this an abstract class as it makes mypy unhappy.
+        raise NotImplementedError()
+
+    def minimal_local_current_token(self) -> Token:
+        """Tries to return a minimal current token for the local instance,
+        i.e. for writers this would be the last successful write.
+
+        If local instance is not a writer (or has written yet) then falls back
+        to returning the normal "current token".
+        """
+        raise NotImplementedError()
+
+    def can_discard_position(
+        self, instance_name: str, prev_token: int, new_token: int
+    ) -> bool:
+        """Whether or not a position command for this stream can be discarded.
+
+        Useful for streams that can never go backwards and where we already know
+        the stream ID for the instance has advanced.
+        """
+        return False
 
     def discard_updates_and_advance(self) -> None:
         """Called when the stream should advance but the updates would be discarded,
@@ -152,10 +173,18 @@ class Stream:
         Returns:
             A triplet `(updates, new_last_token, limited)`, where `updates` is
             a list of `(token, row)` entries, `new_last_token` is the new
-            position in stream, and `limited` is whether there are more updates
-            to fetch.
+            position in stream (ie the highest token returned in the updates),
+            and `limited` is whether there are more updates to fetch.
         """
         current_token = self.current_token(self.local_instance_name)
+
+        # If the minimum current token for the local instance is less than or
+        # equal to the last thing we published, we know that there are no
+        # updates.
+        if self.last_token >= self.minimal_local_current_token():
+            self.last_token = current_token
+            return [], current_token, False
+
         updates, current_token, limited = await self.get_updates_since(
             self.local_instance_name, self.last_token, current_token
         )
@@ -188,6 +217,33 @@ class Stream:
             _STREAM_UPDATE_TARGET_ROW_COUNT,
         )
         return updates, upto_token, limited
+
+
+class _StreamFromIdGen(Stream):
+    """Helper class for simple streams that use a stream ID generator"""
+
+    def __init__(
+        self,
+        local_instance_name: str,
+        update_function: UpdateFunction,
+        stream_id_gen: "AbstractStreamIdGenerator",
+    ):
+        self._stream_id_gen = stream_id_gen
+        super().__init__(local_instance_name, update_function)
+
+    def current_token(self, instance_name: str) -> Token:
+        return self._stream_id_gen.get_current_token_for_writer(instance_name)
+
+    def minimal_local_current_token(self) -> Token:
+        return self._stream_id_gen.get_minimal_local_current_token()
+
+    def can_discard_position(
+        self, instance_name: str, prev_token: int, new_token: int
+    ) -> bool:
+        # These streams can't go backwards, so we know we can ignore any
+        # positions where the tokens are from before the current token.
+
+        return new_token <= self.current_token(instance_name)
 
 
 def current_token_without_instance(
@@ -242,17 +298,29 @@ class BackfillStream(Stream):
         self.store = hs.get_datastores().main
         super().__init__(
             hs.get_instance_name(),
-            self._current_token,
             self.store.get_all_new_backfill_event_rows,
         )
 
-    def _current_token(self, instance_name: str) -> int:
+    def current_token(self, instance_name: str) -> Token:
         # The backfill stream over replication operates on *positive* numbers,
         # which means we need to negate it.
         return -self.store._backfill_id_gen.get_current_token_for_writer(instance_name)
 
+    def minimal_local_current_token(self) -> Token:
+        # The backfill stream over replication operates on *positive* numbers,
+        # which means we need to negate it.
+        return -self.store._backfill_id_gen.get_minimal_local_current_token()
 
-class PresenceStream(Stream):
+    def can_discard_position(
+        self, instance_name: str, prev_token: int, new_token: int
+    ) -> bool:
+        # Backfill stream can't go backwards, so we know we can ignore any
+        # positions where the tokens are from before the current token.
+
+        return new_token <= self.current_token(instance_name)
+
+
+class PresenceStream(_StreamFromIdGen):
     @attr.s(slots=True, frozen=True, auto_attribs=True)
     class PresenceStreamRow:
         user_id: str
@@ -283,9 +351,7 @@ class PresenceStream(Stream):
             update_function = make_http_update_function(hs, self.NAME)
 
         super().__init__(
-            hs.get_instance_name(),
-            current_token_without_instance(store.get_current_presence_token),
-            update_function,
+            hs.get_instance_name(), update_function, store._presence_id_gen
         )
 
 
@@ -305,12 +371,17 @@ class PresenceFederationStream(Stream):
     ROW_TYPE = PresenceFederationStreamRow
 
     def __init__(self, hs: "HomeServer"):
-        federation_queue = hs.get_presence_handler().get_federation_queue()
+        self._federation_queue = hs.get_presence_handler().get_federation_queue()
         super().__init__(
             hs.get_instance_name(),
-            federation_queue.get_current_token,
-            federation_queue.get_replication_rows,
+            self._federation_queue.get_replication_rows,
         )
+
+    def current_token(self, instance_name: str) -> Token:
+        return self._federation_queue.get_current_token(instance_name)
+
+    def minimal_local_current_token(self) -> Token:
+        return self._federation_queue.get_current_token(self.local_instance_name)
 
 
 class TypingStream(Stream):
@@ -341,20 +412,25 @@ class TypingStream(Stream):
             update_function: Callable[
                 [str, int, int, int], Awaitable[Tuple[List[Tuple[int, Any]], int, bool]]
             ] = typing_writer_handler.get_all_typing_updates
-            current_token_function = typing_writer_handler.get_current_token
+            self.current_token_function = typing_writer_handler.get_current_token
         else:
             # Query the typing writer process
             update_function = make_http_update_function(hs, self.NAME)
-            current_token_function = hs.get_typing_handler().get_current_token
+            self.current_token_function = hs.get_typing_handler().get_current_token
 
         super().__init__(
             hs.get_instance_name(),
-            current_token_without_instance(current_token_function),
             update_function,
         )
 
+    def current_token(self, instance_name: str) -> Token:
+        return self.current_token_function()
 
-class ReceiptsStream(Stream):
+    def minimal_local_current_token(self) -> Token:
+        return self.current_token_function()
+
+
+class ReceiptsStream(_StreamFromIdGen):
     @attr.s(slots=True, frozen=True, auto_attribs=True)
     class ReceiptsStreamRow:
         room_id: str
@@ -371,12 +447,12 @@ class ReceiptsStream(Stream):
         store = hs.get_datastores().main
         super().__init__(
             hs.get_instance_name(),
-            current_token_without_instance(store.get_max_receipt_stream_id),
             store.get_all_updated_receipts,
+            store._receipts_id_gen,
         )
 
 
-class PushRulesStream(Stream):
+class PushRulesStream(_StreamFromIdGen):
     """A user has changed their push rules"""
 
     @attr.s(slots=True, frozen=True, auto_attribs=True)
@@ -387,20 +463,16 @@ class PushRulesStream(Stream):
     ROW_TYPE = PushRulesStreamRow
 
     def __init__(self, hs: "HomeServer"):
-        self.store = hs.get_datastores().main
+        store = hs.get_datastores().main
 
         super().__init__(
             hs.get_instance_name(),
-            self._current_token,
-            self.store.get_all_push_rule_updates,
+            store.get_all_push_rule_updates,
+            store._push_rules_stream_id_gen,
         )
 
-    def _current_token(self, instance_name: str) -> int:
-        push_rules_token = self.store.get_max_push_rules_stream_id()
-        return push_rules_token
 
-
-class PushersStream(Stream):
+class PushersStream(_StreamFromIdGen):
     """A user has added/changed/removed a pusher"""
 
     @attr.s(slots=True, frozen=True, auto_attribs=True)
@@ -418,8 +490,8 @@ class PushersStream(Stream):
 
         super().__init__(
             hs.get_instance_name(),
-            current_token_without_instance(store.get_pushers_stream_token),
             store.get_all_updated_pushers_rows,
+            store._pushers_id_gen,
         )
 
 
@@ -447,15 +519,30 @@ class CachesStream(Stream):
     ROW_TYPE = CachesStreamRow
 
     def __init__(self, hs: "HomeServer"):
-        store = hs.get_datastores().main
+        self.store = hs.get_datastores().main
         super().__init__(
             hs.get_instance_name(),
-            store.get_cache_stream_token_for_writer,
-            store.get_all_updated_caches,
+            self.store.get_all_updated_caches,
         )
 
+    def current_token(self, instance_name: str) -> Token:
+        return self.store.get_cache_stream_token_for_writer(instance_name)
 
-class DeviceListsStream(Stream):
+    def minimal_local_current_token(self) -> Token:
+        if self.store._cache_id_gen:
+            return self.store._cache_id_gen.get_minimal_local_current_token()
+        return self.current_token(self.local_instance_name)
+
+    def can_discard_position(
+        self, instance_name: str, prev_token: int, new_token: int
+    ) -> bool:
+        # Caches streams can't go backwards, so we know we can ignore any
+        # positions where the tokens are from before the current token.
+
+        return new_token <= self.current_token(instance_name)
+
+
+class DeviceListsStream(_StreamFromIdGen):
     """Either a user has updated their devices or a remote server needs to be
     told about a device update.
     """
@@ -463,20 +550,69 @@ class DeviceListsStream(Stream):
     @attr.s(slots=True, frozen=True, auto_attribs=True)
     class DeviceListsStreamRow:
         entity: str
+        # Indicates that a user has signed their own device with their user-signing key
+        is_signature: bool
 
     NAME = "device_lists"
     ROW_TYPE = DeviceListsStreamRow
 
     def __init__(self, hs: "HomeServer"):
-        store = hs.get_datastores().main
+        self.store = hs.get_datastores().main
         super().__init__(
             hs.get_instance_name(),
-            current_token_without_instance(store.get_device_stream_token),
-            store.get_all_device_list_changes_for_remotes,
+            self._update_function,
+            self.store._device_list_id_gen,
         )
 
+    async def _update_function(
+        self,
+        instance_name: str,
+        from_token: Token,
+        current_token: Token,
+        target_row_count: int,
+    ) -> StreamUpdateResult:
+        (
+            device_updates,
+            devices_to_token,
+            devices_limited,
+        ) = await self.store.get_all_device_list_changes_for_remotes(
+            instance_name, from_token, current_token, target_row_count
+        )
 
-class ToDeviceStream(Stream):
+        (
+            signatures_updates,
+            signatures_to_token,
+            signatures_limited,
+        ) = await self.store.get_all_user_signature_changes_for_remotes(
+            instance_name, from_token, current_token, target_row_count
+        )
+
+        upper_limit_token = current_token
+        if devices_limited:
+            upper_limit_token = min(upper_limit_token, devices_to_token)
+        if signatures_limited:
+            upper_limit_token = min(upper_limit_token, signatures_to_token)
+
+        device_updates = [
+            (stream_id, (entity, False))
+            for stream_id, (entity,) in device_updates
+            if stream_id <= upper_limit_token
+        ]
+
+        signatures_updates = [
+            (stream_id, (entity, True))
+            for stream_id, (entity,) in signatures_updates
+            if stream_id <= upper_limit_token
+        ]
+
+        updates = list(
+            heapq.merge(device_updates, signatures_updates, key=lambda row: row[0])
+        )
+
+        return updates, upper_limit_token, devices_limited or signatures_limited
+
+
+class ToDeviceStream(_StreamFromIdGen):
     """New to_device messages for a client"""
 
     @attr.s(slots=True, frozen=True, auto_attribs=True)
@@ -490,33 +626,12 @@ class ToDeviceStream(Stream):
         store = hs.get_datastores().main
         super().__init__(
             hs.get_instance_name(),
-            current_token_without_instance(store.get_to_device_stream_token),
             store.get_all_new_device_messages,
+            store._to_device_msg_id_gen,
         )
 
 
-class TagAccountDataStream(Stream):
-    """Someone added/removed a tag for a room"""
-
-    @attr.s(slots=True, frozen=True, auto_attribs=True)
-    class TagAccountDataStreamRow:
-        user_id: str
-        room_id: str
-        data: JsonDict
-
-    NAME = "tag_account_data"
-    ROW_TYPE = TagAccountDataStreamRow
-
-    def __init__(self, hs: "HomeServer"):
-        store = hs.get_datastores().main
-        super().__init__(
-            hs.get_instance_name(),
-            current_token_without_instance(store.get_max_account_data_stream_id),
-            store.get_all_updated_tags,
-        )
-
-
-class AccountDataStream(Stream):
+class AccountDataStream(_StreamFromIdGen):
     """Global or per room account data was changed"""
 
     @attr.s(slots=True, frozen=True, auto_attribs=True)
@@ -532,8 +647,8 @@ class AccountDataStream(Stream):
         self.store = hs.get_datastores().main
         super().__init__(
             hs.get_instance_name(),
-            current_token_without_instance(self.store.get_max_account_data_stream_id),
             self._update_function,
+            self.store._account_data_id_gen,
         )
 
     async def _update_function(
@@ -560,6 +675,19 @@ class AccountDataStream(Stream):
             to_token = room_results[-1][0]
             limited = True
 
+        tags, tag_to_token, tags_limited = await self.store.get_all_updated_tags(
+            instance_name,
+            from_token,
+            to_token,
+            limit,
+        )
+
+        # again, if the tag results hit the limit, limit the global results to
+        # the same stream token.
+        if tags_limited:
+            to_token = tag_to_token
+            limited = True
+
         # convert the global results to the right format, and limit them to the to_token
         # at the same time
         global_rows = (
@@ -568,11 +696,16 @@ class AccountDataStream(Stream):
             if stream_id <= to_token
         )
 
-        # we know that the room_results are already limited to `to_token` so no need
-        # for a check on `stream_id` here.
         room_rows = (
             (stream_id, (user_id, room_id, account_data_type))
             for stream_id, user_id, room_id, account_data_type in room_results
+            if stream_id <= to_token
+        )
+
+        tag_rows = (
+            (stream_id, (user_id, room_id, AccountDataTypes.TAG))
+            for stream_id, user_id, room_id in tags
+            if stream_id <= to_token
         )
 
         # We need to return a sorted list, so merge them together.
@@ -582,24 +715,7 @@ class AccountDataStream(Stream):
         # leading to a comparison between the data tuples. The comparison could
         # fail due to attempting to compare the `room_id` which results in a
         # `TypeError` from comparing a `str` vs `None`.
-        updates = list(heapq.merge(room_rows, global_rows, key=lambda row: row[0]))
-        return updates, to_token, limited
-
-
-class UserSignatureStream(Stream):
-    """A user has signed their own device with their user-signing key"""
-
-    @attr.s(slots=True, frozen=True, auto_attribs=True)
-    class UserSignatureStreamRow:
-        user_id: str
-
-    NAME = "user_signature"
-    ROW_TYPE = UserSignatureStreamRow
-
-    def __init__(self, hs: "HomeServer"):
-        store = hs.get_datastores().main
-        super().__init__(
-            hs.get_instance_name(),
-            current_token_without_instance(store.get_device_stream_token),
-            store.get_all_user_signature_changes_for_remotes,
+        updates = list(
+            heapq.merge(room_rows, global_rows, tag_rows, key=lambda row: row[0])
         )
+        return updates, to_token, limited

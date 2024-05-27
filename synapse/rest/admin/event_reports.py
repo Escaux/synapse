@@ -1,23 +1,31 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 Dirk Klimpel
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Tuple
 
+from synapse.api.constants import Direction
 from synapse.api.errors import Codes, NotFoundError, SynapseError
-from synapse.http.servlet import RestServlet, parse_integer, parse_string
+from synapse.http.servlet import RestServlet, parse_enum, parse_integer, parse_string
 from synapse.http.site import SynapseRequest
 from synapse.rest.admin._base import admin_patterns, assert_requester_is_admin
 from synapse.types import JsonDict
@@ -52,15 +60,15 @@ class EventReportsRestServlet(RestServlet):
     PATTERNS = admin_patterns("/event_reports$")
 
     def __init__(self, hs: "HomeServer"):
-        self.auth = hs.get_auth()
-        self.store = hs.get_datastores().main
+        self._auth = hs.get_auth()
+        self._store = hs.get_datastores().main
 
     async def on_GET(self, request: SynapseRequest) -> Tuple[int, JsonDict]:
-        await assert_requester_is_admin(self.auth, request)
+        await assert_requester_is_admin(self._auth, request)
 
         start = parse_integer(request, "from", default=0)
         limit = parse_integer(request, "limit", default=100)
-        direction = parse_string(request, "dir", default="b")
+        direction = parse_enum(request, "dir", Direction, Direction.BACKWARDS)
         user_id = parse_string(request, "user_id")
         room_id = parse_string(request, "room_id")
 
@@ -78,14 +86,7 @@ class EventReportsRestServlet(RestServlet):
                 errcode=Codes.INVALID_PARAM,
             )
 
-        if direction not in ("f", "b"):
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Unknown direction: %s" % (direction,),
-                errcode=Codes.INVALID_PARAM,
-            )
-
-        event_reports, total = await self.store.get_event_reports_paginate(
+        event_reports, total = await self._store.get_event_reports_paginate(
             start, limit, direction, user_id, room_id
         )
         ret = {"event_reports": event_reports, "total": total}
@@ -114,13 +115,13 @@ class EventReportDetailRestServlet(RestServlet):
     PATTERNS = admin_patterns("/event_reports/(?P<report_id>[^/]*)$")
 
     def __init__(self, hs: "HomeServer"):
-        self.auth = hs.get_auth()
-        self.store = hs.get_datastores().main
+        self._auth = hs.get_auth()
+        self._store = hs.get_datastores().main
 
     async def on_GET(
         self, request: SynapseRequest, report_id: str
     ) -> Tuple[int, JsonDict]:
-        await assert_requester_is_admin(self.auth, request)
+        await assert_requester_is_admin(self._auth, request)
 
         message = (
             "The report_id parameter must be a string representing a positive integer."
@@ -137,8 +138,33 @@ class EventReportDetailRestServlet(RestServlet):
                 HTTPStatus.BAD_REQUEST, message, errcode=Codes.INVALID_PARAM
             )
 
-        ret = await self.store.get_event_report(resolved_report_id)
+        ret = await self._store.get_event_report(resolved_report_id)
         if not ret:
             raise NotFoundError("Event report not found")
 
         return HTTPStatus.OK, ret
+
+    async def on_DELETE(
+        self, request: SynapseRequest, report_id: str
+    ) -> Tuple[int, JsonDict]:
+        await assert_requester_is_admin(self._auth, request)
+
+        message = (
+            "The report_id parameter must be a string representing a positive integer."
+        )
+        try:
+            resolved_report_id = int(report_id)
+        except ValueError:
+            raise SynapseError(
+                HTTPStatus.BAD_REQUEST, message, errcode=Codes.INVALID_PARAM
+            )
+
+        if resolved_report_id < 0:
+            raise SynapseError(
+                HTTPStatus.BAD_REQUEST, message, errcode=Codes.INVALID_PARAM
+            )
+
+        if await self._store.delete_event_report(resolved_report_id):
+            return HTTPStatus.OK, {}
+
+        raise NotFoundError("Event report not found")

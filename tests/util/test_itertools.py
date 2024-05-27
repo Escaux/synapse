@@ -1,19 +1,30 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from typing import Dict, Iterable, List, Sequence
 
-from synapse.util.iterutils import chunk_seq, sorted_topologically
+from synapse.util.iterutils import (
+    chunk_seq,
+    sorted_topologically,
+    sorted_topologically_batched,
+)
 
 from tests.unittest import TestCase
 
@@ -107,3 +118,73 @@ class SortTopologically(TestCase):
         graph: Dict[int, List[int]] = {1: [], 2: [1], 3: [2], 4: [3, 2, 1]}
 
         self.assertEqual(list(sorted_topologically([4, 3, 2, 1], graph)), [1, 2, 3, 4])
+
+
+class SortTopologicallyBatched(TestCase):
+    "Test cases for `sorted_topologically_batched`"
+
+    def test_empty(self) -> None:
+        "Test that an empty graph works correctly"
+
+        graph: Dict[int, List[int]] = {}
+        self.assertEqual(list(sorted_topologically_batched([], graph)), [])
+
+    def test_handle_empty_graph(self) -> None:
+        "Test that a graph where a node doesn't have an entry is treated as empty"
+
+        graph: Dict[int, List[int]] = {}
+
+        # For disconnected nodes the output is simply sorted.
+        self.assertEqual(list(sorted_topologically_batched([1, 2], graph)), [[1, 2]])
+
+    def test_disconnected(self) -> None:
+        "Test that a graph with no edges work"
+
+        graph: Dict[int, List[int]] = {1: [], 2: []}
+
+        # For disconnected nodes the output is simply sorted.
+        self.assertEqual(list(sorted_topologically_batched([1, 2], graph)), [[1, 2]])
+
+    def test_linear(self) -> None:
+        "Test that a simple `4 -> 3 -> 2 -> 1` graph works"
+
+        graph: Dict[int, List[int]] = {1: [], 2: [1], 3: [2], 4: [3]}
+
+        self.assertEqual(
+            list(sorted_topologically_batched([4, 3, 2, 1], graph)),
+            [[1], [2], [3], [4]],
+        )
+
+    def test_subset(self) -> None:
+        "Test that only sorting a subset of the graph works"
+        graph: Dict[int, List[int]] = {1: [], 2: [1], 3: [2], 4: [3]}
+
+        self.assertEqual(list(sorted_topologically_batched([4, 3], graph)), [[3], [4]])
+
+    def test_fork(self) -> None:
+        "Test that a forked graph works"
+        graph: Dict[int, List[int]] = {1: [], 2: [1], 3: [1], 4: [2, 3]}
+
+        # Valid orderings are `[1, 3, 2, 4]` or `[1, 2, 3, 4]`, but we should
+        # always get the same one.
+        self.assertEqual(
+            list(sorted_topologically_batched([4, 3, 2, 1], graph)), [[1], [2, 3], [4]]
+        )
+
+    def test_duplicates(self) -> None:
+        "Test that a graph with duplicate edges work"
+        graph: Dict[int, List[int]] = {1: [], 2: [1, 1], 3: [2, 2], 4: [3]}
+
+        self.assertEqual(
+            list(sorted_topologically_batched([4, 3, 2, 1], graph)),
+            [[1], [2], [3], [4]],
+        )
+
+    def test_multiple_paths(self) -> None:
+        "Test that a graph with multiple paths between two nodes work"
+        graph: Dict[int, List[int]] = {1: [], 2: [1], 3: [2], 4: [3, 2, 1]}
+
+        self.assertEqual(
+            list(sorted_topologically_batched([4, 3, 2, 1], graph)),
+            [[1], [2], [3], [4]],
+        )

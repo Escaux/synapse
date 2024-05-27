@@ -1,26 +1,40 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from typing import Any, Iterable
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
+from typing import TYPE_CHECKING, Any, Dict, Type, TypeVar
 
 import jsonschema
 
+from synapse._pydantic_compat import HAS_PYDANTIC_V2
+
+if TYPE_CHECKING or HAS_PYDANTIC_V2:
+    from pydantic.v1 import BaseModel, ValidationError, parse_obj_as
+else:
+    from pydantic import BaseModel, ValidationError, parse_obj_as
+
 from synapse.config._base import ConfigError
-from synapse.types import JsonDict
+from synapse.types import JsonDict, StrSequence
 
 
 def validate_config(
-    json_schema: JsonDict, config: Any, config_path: Iterable[str]
+    json_schema: JsonDict, config: Any, config_path: StrSequence
 ) -> None:
     """Validates a config setting against a JsonSchema definition
 
@@ -44,7 +58,7 @@ def validate_config(
 
 
 def json_error_to_config_error(
-    e: jsonschema.ValidationError, config_path: Iterable[str]
+    e: jsonschema.ValidationError, config_path: StrSequence
 ) -> ConfigError:
     """Converts a json validation error to a user-readable ConfigError
 
@@ -64,3 +78,28 @@ def json_error_to_config_error(
         else:
             path.append(str(p))
     return ConfigError(e.message, path)
+
+
+Model = TypeVar("Model", bound=BaseModel)
+
+
+def parse_and_validate_mapping(
+    config: Any,
+    model_type: Type[Model],
+) -> Dict[str, Model]:
+    """Parse `config` as a mapping from strings to a given `Model` type.
+    Args:
+        config: The configuration data to check
+        model_type: The BaseModel to validate and parse against.
+    Returns:
+        Fully validated and parsed Dict[str, Model].
+    Raises:
+        ConfigError, if given improper input.
+    """
+    try:
+        # type-ignore: mypy doesn't like constructing `Dict[str, model_type]` because
+        # `model_type` is a runtime variable. Pydantic is fine with this.
+        instances = parse_obj_as(Dict[str, model_type], config)  # type: ignore[valid-type]
+    except ValidationError as e:
+        raise ConfigError(str(e)) from e
+    return instances

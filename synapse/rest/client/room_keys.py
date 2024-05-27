@@ -1,16 +1,22 @@
-# Copyright 2017, 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, Optional, Tuple, cast
@@ -37,6 +43,7 @@ class RoomKeysServlet(RestServlet):
     PATTERNS = client_patterns(
         "/room_keys/keys(/(?P<room_id>[^/]+))?(/(?P<session_id>[^/]+))?$"
     )
+    CATEGORY = "Encryption requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -253,11 +260,38 @@ class RoomKeysServlet(RestServlet):
 
 class RoomKeysNewVersionServlet(RestServlet):
     PATTERNS = client_patterns("/room_keys/version$")
+    CATEGORY = "Encryption requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
         self.auth = hs.get_auth()
         self.e2e_room_keys_handler = hs.get_e2e_room_keys_handler()
+
+    async def on_GET(self, request: SynapseRequest) -> Tuple[int, JsonDict]:
+        """
+        Retrieve the version information about the most current backup version (if any)
+
+        It takes out an exclusive lock on this user's room_key backups, to ensure
+        clients only upload to the current backup.
+
+        Returns 404 if the given version does not exist.
+
+        GET /room_keys/version HTTP/1.1
+        {
+            "version": "12345",
+            "algorithm": "m.megolm_backup.v1",
+            "auth_data": "dGhpcyBzaG91bGQgYWN0dWFsbHkgYmUgZW5jcnlwdGVkIGpzb24K"
+        }
+        """
+        requester = await self.auth.get_user_by_req(request, allow_guest=False)
+        user_id = requester.user.to_string()
+
+        try:
+            info = await self.e2e_room_keys_handler.get_version_info(user_id)
+        except SynapseError as e:
+            if e.code == 404:
+                raise SynapseError(404, "No backup found", Codes.NOT_FOUND)
+        return 200, info
 
     async def on_POST(self, request: SynapseRequest) -> Tuple[int, JsonDict]:
         """
@@ -301,7 +335,8 @@ class RoomKeysNewVersionServlet(RestServlet):
 
 
 class RoomKeysVersionServlet(RestServlet):
-    PATTERNS = client_patterns("/room_keys/version(/(?P<version>[^/]+))?$")
+    PATTERNS = client_patterns("/room_keys/version/(?P<version>[^/]+)$")
+    CATEGORY = "Encryption requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -309,12 +344,11 @@ class RoomKeysVersionServlet(RestServlet):
         self.e2e_room_keys_handler = hs.get_e2e_room_keys_handler()
 
     async def on_GET(
-        self, request: SynapseRequest, version: Optional[str]
+        self, request: SynapseRequest, version: str
     ) -> Tuple[int, JsonDict]:
         """
         Retrieve the version information about a given version of the user's
-        room_keys backup.  If the version part is missing, returns info about the
-        most current backup version (if any)
+        room_keys backup.
 
         It takes out an exclusive lock on this user's room_key backups, to ensure
         clients only upload to the current backup.
@@ -339,20 +373,16 @@ class RoomKeysVersionServlet(RestServlet):
         return 200, info
 
     async def on_DELETE(
-        self, request: SynapseRequest, version: Optional[str]
+        self, request: SynapseRequest, version: str
     ) -> Tuple[int, JsonDict]:
         """
         Delete the information about a given version of the user's
-        room_keys backup.  If the version part is missing, deletes the most
-        current backup version (if any). Doesn't delete the actual room data.
+        room_keys backup. Doesn't delete the actual room data.
 
         DELETE /room_keys/version/12345 HTTP/1.1
         HTTP/1.1 200 OK
         {}
         """
-        if version is None:
-            raise SynapseError(400, "No version specified to delete", Codes.NOT_FOUND)
-
         requester = await self.auth.get_user_by_req(request, allow_guest=False)
         user_id = requester.user.to_string()
 
@@ -360,7 +390,7 @@ class RoomKeysVersionServlet(RestServlet):
         return 200, {}
 
     async def on_PUT(
-        self, request: SynapseRequest, version: Optional[str]
+        self, request: SynapseRequest, version: str
     ) -> Tuple[int, JsonDict]:
         """
         Update the information about a given version of the user's room_keys backup.
@@ -385,11 +415,6 @@ class RoomKeysVersionServlet(RestServlet):
         requester = await self.auth.get_user_by_req(request, allow_guest=False)
         user_id = requester.user.to_string()
         info = parse_json_object_from_request(request)
-
-        if version is None:
-            raise SynapseError(
-                400, "No version specified to update", Codes.MISSING_PARAM
-            )
 
         await self.e2e_room_keys_handler.update_version(user_id, version, info)
         return 200, {}

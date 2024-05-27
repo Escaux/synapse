@@ -1,17 +1,25 @@
-// Copyright 2022 The Matrix.org Foundation C.I.C.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * This file is licensed under the Affero General Public License (AGPL) version 3.
+ *
+ * Copyright 2022 The Matrix.org Foundation C.I.C.
+ * Copyright (C) 2023 New Vector, Ltd
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * See the GNU Affero General Public License for more details:
+ * <https://www.gnu.org/licenses/agpl-3.0.html>.
+ *
+ * Originally licensed under the Apache License, Version 2.0:
+ * <http://www.apache.org/licenses/LICENSE-2.0>.
+ *
+ * [This file includes modifications made by New Vector Limited]
+ *
+ */
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Error};
@@ -22,9 +30,10 @@ use regex::Regex;
 
 use super::{
     utils::{get_glob_matcher, get_localpart_from_id, GlobMatchType},
-    Action, Condition, EventMatchCondition, FilteredPushRules, KnownCondition,
-    RelatedEventMatchCondition,
+    Action, Condition, EventPropertyIsCondition, FilteredPushRules, KnownCondition,
+    SimpleJsonValue,
 };
+use crate::push::{EventMatchPatternType, JsonValue};
 
 lazy_static! {
     /// Used to parse the `is` clause in the room member count condition.
@@ -61,12 +70,17 @@ impl RoomVersionFeatures {
 /// Allows running a set of push rules against a particular event.
 #[pyclass]
 pub struct PushRuleEvaluator {
-    /// A mapping of "flattened" keys to string values in the event, e.g.
+    /// A mapping of "flattened" keys to simple JSON values in the event, e.g.
     /// includes things like "type" and "content.msgtype".
-    flattened_keys: BTreeMap<String, String>,
+    flattened_keys: BTreeMap<String, JsonValue>,
 
     /// The "content.body", if any.
     body: String,
+
+    /// True if the event has a m.mentions property. (Note that this is a separate
+    /// flag instead of checking flattened_keys since the m.mentions property
+    /// might be an empty map and not appear in flattened_keys.
+    has_mentions: bool,
 
     /// The number of users in the room.
     room_member_count: u64,
@@ -80,7 +94,7 @@ pub struct PushRuleEvaluator {
 
     /// The related events, indexed by relation type. Flattened in the same manner as
     /// `flattened_keys`.
-    related_events_flattened: BTreeMap<String, BTreeMap<String, String>>,
+    related_events_flattened: BTreeMap<String, BTreeMap<String, JsonValue>>,
 
     /// If msc3664, push rules for related events, is enabled.
     related_event_match_enabled: bool,
@@ -98,24 +112,37 @@ impl PushRuleEvaluator {
     /// Create a new `PushRuleEvaluator`. See struct docstring for details.
     #[allow(clippy::too_many_arguments)]
     #[new]
+    #[pyo3(signature = (
+        flattened_keys,
+        has_mentions,
+        room_member_count,
+        sender_power_level,
+        notification_power_levels,
+        related_events_flattened,
+        related_event_match_enabled,
+        room_version_feature_flags,
+        msc3931_enabled,
+    ))]
     pub fn py_new(
-        flattened_keys: BTreeMap<String, String>,
+        flattened_keys: BTreeMap<String, JsonValue>,
+        has_mentions: bool,
         room_member_count: u64,
         sender_power_level: Option<i64>,
         notification_power_levels: BTreeMap<String, i64>,
-        related_events_flattened: BTreeMap<String, BTreeMap<String, String>>,
+        related_events_flattened: BTreeMap<String, BTreeMap<String, JsonValue>>,
         related_event_match_enabled: bool,
         room_version_feature_flags: Vec<String>,
         msc3931_enabled: bool,
     ) -> Result<Self, Error> {
-        let body = flattened_keys
-            .get("content.body")
-            .cloned()
-            .unwrap_or_default();
+        let body = match flattened_keys.get("content.body") {
+            Some(JsonValue::Value(SimpleJsonValue::Str(s))) => s.clone().into_owned(),
+            _ => String::new(),
+        };
 
         Ok(PushRuleEvaluator {
             flattened_keys,
             body,
+            has_mentions,
             room_member_count,
             notification_power_levels,
             sender_power_level,
@@ -133,7 +160,7 @@ impl PushRuleEvaluator {
     /// name.
     ///
     /// Returns the set of actions, if any, that match (filtering out any
-    /// `dont_notify` actions).
+    /// `dont_notify` and `coalesce` actions).
     pub fn run(
         &self,
         push_rules: &FilteredPushRules,
@@ -146,6 +173,17 @@ impl PushRuleEvaluator {
             }
 
             let rule_id = &push_rule.rule_id().to_string();
+
+            // For backwards-compatibility the legacy mention rules are disabled
+            // if the event contains the 'm.mentions' property.
+            if self.has_mentions
+                && (rule_id == "global/override/.m.rule.contains_display_name"
+                    || rule_id == "global/content/.m.rule.contains_user_name"
+                    || rule_id == "global/override/.m.rule.roomnotif")
+            {
+                continue;
+            }
+
             let extev_flag = &RoomVersionFeatures::ExtensibleEvents.as_str().to_string();
             let supports_extensible_events = self.room_version_feature_flags.contains(extev_flag);
             let safe_from_rver_condition = SAFE_EXTENSIBLE_EVENTS_RULE_IDS.contains(rule_id);
@@ -178,8 +216,9 @@ impl PushRuleEvaluator {
             let actions = push_rule
                 .actions
                 .iter()
-                // Filter out "dont_notify" actions, as we don't store them.
-                .filter(|a| **a != Action::DontNotify)
+                // Filter out "dont_notify" and "coalesce" actions, as we don't store them
+                // (since they result in no action by the pushers).
+                .filter(|a| **a != Action::DontNotify && **a != Action::Coalesce)
                 .cloned()
                 .collect();
 
@@ -223,11 +262,85 @@ impl PushRuleEvaluator {
         };
 
         let result = match known_condition {
-            KnownCondition::EventMatch(event_match) => {
-                self.match_event_match(event_match, user_id)?
+            KnownCondition::EventMatch(event_match) => self.match_event_match(
+                &self.flattened_keys,
+                &event_match.key,
+                &event_match.pattern,
+            )?,
+            KnownCondition::EventMatchType(event_match) => {
+                // The `pattern_type` can either be "user_id" or "user_localpart",
+                // either way if we don't have a `user_id` then the condition can't
+                // match.
+                let user_id = if let Some(user_id) = user_id {
+                    user_id
+                } else {
+                    return Ok(false);
+                };
+
+                let pattern = match &*event_match.pattern_type {
+                    EventMatchPatternType::UserId => user_id,
+                    EventMatchPatternType::UserLocalpart => get_localpart_from_id(user_id)?,
+                };
+
+                self.match_event_match(&self.flattened_keys, &event_match.key, pattern)?
             }
-            KnownCondition::RelatedEventMatch(event_match) => {
-                self.match_related_event_match(event_match, user_id)?
+            KnownCondition::EventPropertyIs(event_property_is) => {
+                self.match_event_property_is(event_property_is)?
+            }
+            KnownCondition::RelatedEventMatch(event_match) => self.match_related_event_match(
+                &event_match.rel_type.clone(),
+                event_match.include_fallbacks,
+                event_match.key.clone(),
+                event_match.pattern.clone(),
+            )?,
+            KnownCondition::RelatedEventMatchType(event_match) => {
+                // The `pattern_type` can either be "user_id" or "user_localpart",
+                // either way if we don't have a `user_id` then the condition can't
+                // match.
+                let user_id = if let Some(user_id) = user_id {
+                    user_id
+                } else {
+                    return Ok(false);
+                };
+
+                let pattern = match &*event_match.pattern_type {
+                    EventMatchPatternType::UserId => user_id,
+                    EventMatchPatternType::UserLocalpart => get_localpart_from_id(user_id)?,
+                };
+
+                self.match_related_event_match(
+                    &event_match.rel_type.clone(),
+                    event_match.include_fallbacks,
+                    Some(event_match.key.clone()),
+                    Some(Cow::Borrowed(pattern)),
+                )?
+            }
+            KnownCondition::EventPropertyContains(event_property_is) => self
+                .match_event_property_contains(
+                    event_property_is.key.clone(),
+                    event_property_is.value.clone(),
+                )?,
+            KnownCondition::ExactEventPropertyContainsType(exact_event_match) => {
+                // The `pattern_type` can either be "user_id" or "user_localpart",
+                // either way if we don't have a `user_id` then the condition can't
+                // match.
+                let user_id = if let Some(user_id) = user_id {
+                    user_id
+                } else {
+                    return Ok(false);
+                };
+
+                let pattern = match &*exact_event_match.value_type {
+                    EventMatchPatternType::UserId => user_id.to_owned(),
+                    EventMatchPatternType::UserLocalpart => {
+                        get_localpart_from_id(user_id)?.to_owned()
+                    }
+                };
+
+                self.match_event_property_contains(
+                    exact_event_match.key.clone(),
+                    Cow::Borrowed(&SimpleJsonValue::Str(Cow::Owned(pattern))),
+                )?
             }
             KnownCondition::ContainsDisplayName => {
                 if let Some(dn) = display_name {
@@ -279,104 +392,13 @@ impl PushRuleEvaluator {
     /// Evaluates a `event_match` condition.
     fn match_event_match(
         &self,
-        event_match: &EventMatchCondition,
-        user_id: Option<&str>,
+        flattened_event: &BTreeMap<String, JsonValue>,
+        key: &str,
+        pattern: &str,
     ) -> Result<bool, Error> {
-        let pattern = if let Some(pattern) = &event_match.pattern {
-            pattern
-        } else if let Some(pattern_type) = &event_match.pattern_type {
-            // The `pattern_type` can either be "user_id" or "user_localpart",
-            // either way if we don't have a `user_id` then the condition can't
-            // match.
-            let user_id = if let Some(user_id) = user_id {
-                user_id
-            } else {
-                return Ok(false);
-            };
-
-            match &**pattern_type {
-                "user_id" => user_id,
-                "user_localpart" => get_localpart_from_id(user_id)?,
-                _ => return Ok(false),
-            }
-        } else {
-            return Ok(false);
-        };
-
-        let haystack = if let Some(haystack) = self.flattened_keys.get(&*event_match.key) {
-            haystack
-        } else {
-            return Ok(false);
-        };
-
-        // For the content.body we match against "words", but for everything
-        // else we match against the entire value.
-        let match_type = if event_match.key == "content.body" {
-            GlobMatchType::Word
-        } else {
-            GlobMatchType::Whole
-        };
-
-        let mut compiled_pattern = get_glob_matcher(pattern, match_type)?;
-        compiled_pattern.is_match(haystack)
-    }
-
-    /// Evaluates a `related_event_match` condition. (MSC3664)
-    fn match_related_event_match(
-        &self,
-        event_match: &RelatedEventMatchCondition,
-        user_id: Option<&str>,
-    ) -> Result<bool, Error> {
-        // First check if related event matching is enabled...
-        if !self.related_event_match_enabled {
-            return Ok(false);
-        }
-
-        // get the related event, fail if there is none.
-        let event = if let Some(event) = self.related_events_flattened.get(&*event_match.rel_type) {
-            event
-        } else {
-            return Ok(false);
-        };
-
-        // If we are not matching fallbacks, don't match if our special key indicating this is a
-        // fallback relation is not present.
-        if !event_match.include_fallbacks.unwrap_or(false)
-            && event.contains_key("im.vector.is_falling_back")
+        let haystack = if let Some(JsonValue::Value(SimpleJsonValue::Str(haystack))) =
+            flattened_event.get(key)
         {
-            return Ok(false);
-        }
-
-        // if we have no key, accept the event as matching, if it existed without matching any
-        // fields.
-        let key = if let Some(key) = &event_match.key {
-            key
-        } else {
-            return Ok(true);
-        };
-
-        let pattern = if let Some(pattern) = &event_match.pattern {
-            pattern
-        } else if let Some(pattern_type) = &event_match.pattern_type {
-            // The `pattern_type` can either be "user_id" or "user_localpart",
-            // either way if we don't have a `user_id` then the condition can't
-            // match.
-            let user_id = if let Some(user_id) = user_id {
-                user_id
-            } else {
-                return Ok(false);
-            };
-
-            match &**pattern_type {
-                "user_id" => user_id,
-                "user_localpart" => get_localpart_from_id(user_id)?,
-                _ => return Ok(false),
-            }
-        } else {
-            return Ok(false);
-        };
-
-        let haystack = if let Some(haystack) = event.get(&**key) {
             haystack
         } else {
             return Ok(false);
@@ -392,6 +414,75 @@ impl PushRuleEvaluator {
 
         let mut compiled_pattern = get_glob_matcher(pattern, match_type)?;
         compiled_pattern.is_match(haystack)
+    }
+
+    /// Evaluates a `event_property_is` condition.
+    fn match_event_property_is(
+        &self,
+        event_property_is: &EventPropertyIsCondition,
+    ) -> Result<bool, Error> {
+        let value = &event_property_is.value;
+
+        let haystack = if let Some(JsonValue::Value(haystack)) =
+            self.flattened_keys.get(&*event_property_is.key)
+        {
+            haystack
+        } else {
+            return Ok(false);
+        };
+
+        Ok(haystack == &**value)
+    }
+
+    /// Evaluates a `related_event_match` condition. (MSC3664)
+    fn match_related_event_match(
+        &self,
+        rel_type: &str,
+        include_fallbacks: Option<bool>,
+        key: Option<Cow<str>>,
+        pattern: Option<Cow<str>>,
+    ) -> Result<bool, Error> {
+        // First check if related event matching is enabled...
+        if !self.related_event_match_enabled {
+            return Ok(false);
+        }
+
+        // get the related event, fail if there is none.
+        let event = if let Some(event) = self.related_events_flattened.get(rel_type) {
+            event
+        } else {
+            return Ok(false);
+        };
+
+        // If we are not matching fallbacks, don't match if our special key indicating this is a
+        // fallback relation is not present.
+        if !include_fallbacks.unwrap_or(false) && event.contains_key("im.vector.is_falling_back") {
+            return Ok(false);
+        }
+
+        match (key, pattern) {
+            // if we have no key, accept the event as matching.
+            (None, _) => Ok(true),
+            // There was a key, so we *must* have a pattern to go with it.
+            (Some(_), None) => Ok(false),
+            // If there is a key & pattern, check if they're in the flattened event (given by rel_type).
+            (Some(key), Some(pattern)) => self.match_event_match(event, &key, &pattern),
+        }
+    }
+
+    /// Evaluates a `event_property_contains` condition.
+    fn match_event_property_contains(
+        &self,
+        key: Cow<str>,
+        value: Cow<SimpleJsonValue>,
+    ) -> Result<bool, Error> {
+        let haystack = if let Some(JsonValue::Array(haystack)) = self.flattened_keys.get(&*key) {
+            haystack
+        } else {
+            return Ok(false);
+        };
+
+        Ok(haystack.contains(&value))
     }
 
     /// Match the member count against an 'is' condition
@@ -421,9 +512,13 @@ impl PushRuleEvaluator {
 #[test]
 fn push_rule_evaluator() {
     let mut flattened_keys = BTreeMap::new();
-    flattened_keys.insert("content.body".to_string(), "foo bar bob hello".to_string());
+    flattened_keys.insert(
+        "content.body".to_string(),
+        JsonValue::Value(SimpleJsonValue::Str(Cow::Borrowed("foo bar bob hello"))),
+    );
     let evaluator = PushRuleEvaluator::py_new(
         flattened_keys,
+        false,
         10,
         Some(0),
         BTreeMap::new(),
@@ -445,10 +540,14 @@ fn test_requires_room_version_supports_condition() {
     use crate::push::{PushRule, PushRules};
 
     let mut flattened_keys = BTreeMap::new();
-    flattened_keys.insert("content.body".to_string(), "foo bar bob hello".to_string());
+    flattened_keys.insert(
+        "content.body".to_string(),
+        JsonValue::Value(SimpleJsonValue::Str(Cow::Borrowed("foo bar bob hello"))),
+    );
     let flags = vec![RoomVersionFeatures::ExtensibleEvents.as_str().to_string()];
     let evaluator = PushRuleEvaluator::py_new(
         flattened_keys,
+        false,
         10,
         Some(0),
         BTreeMap::new(),
@@ -483,7 +582,7 @@ fn test_requires_room_version_supports_condition() {
     };
     let rules = PushRules::new(vec![custom_rule]);
     result = evaluator.run(
-        &FilteredPushRules::py_new(rules, BTreeMap::new(), true, true),
+        &FilteredPushRules::py_new(rules, BTreeMap::new(), true, false, true, false),
         None,
         None,
     );

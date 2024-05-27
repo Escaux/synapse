@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """This module contains base REST classes for constructing client v1 servlets.
 """
@@ -20,14 +27,14 @@ from typing import Any, Awaitable, Callable, Iterable, Pattern, Tuple, TypeVar, 
 
 from synapse.api.errors import InteractiveAuthIncompleteError
 from synapse.api.urls import CLIENT_API_PREFIX
-from synapse.types import JsonDict
+from synapse.types import JsonDict, StrCollection
 
 logger = logging.getLogger(__name__)
 
 
 def client_patterns(
     path_regex: str,
-    releases: Iterable[str] = ("r0", "v3"),
+    releases: StrCollection = ("r0", "v3"),
     unstable: bool = True,
     v1: bool = False,
 ) -> Iterable[Pattern]:
@@ -43,19 +50,22 @@ def client_patterns(
     Returns:
         An iterable of patterns.
     """
-    patterns = []
+    versions = []
 
-    if unstable:
-        unstable_prefix = CLIENT_API_PREFIX + "/unstable"
-        patterns.append(re.compile("^" + unstable_prefix + path_regex))
     if v1:
-        v1_prefix = CLIENT_API_PREFIX + "/api/v1"
-        patterns.append(re.compile("^" + v1_prefix + path_regex))
-    for release in releases:
-        new_prefix = CLIENT_API_PREFIX + f"/{release}"
-        patterns.append(re.compile("^" + new_prefix + path_regex))
+        versions.append("api/v1")
+    versions.extend(releases)
+    if unstable:
+        versions.append("unstable")
 
-    return patterns
+    if len(versions) == 1:
+        versions_str = versions[0]
+    elif len(versions) > 1:
+        versions_str = "(" + "|".join(versions) + ")"
+    else:
+        raise RuntimeError("Must have at least one version for a URL")
+
+    return [re.compile("^" + CLIENT_API_PREFIX + "/" + versions_str + path_regex)]
 
 
 def set_timeline_upper_limit(filter_json: JsonDict, filter_timeline_limit: int) -> None:

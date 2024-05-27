@@ -1,18 +1,27 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the 'License');
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an 'AS IS' BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, cast
+
+from parameterized import parameterized
 
 from twisted.test.proto_helpers import MemoryReactor
 from twisted.trial import unittest
@@ -38,7 +47,8 @@ class EventChainStoreTestCase(HomeserverTestCase):
         self.store = hs.get_datastores().main
         self._next_stream_ordering = 1
 
-    def test_simple(self) -> None:
+    @parameterized.expand([(False,), (True,)])
+    def test_simple(self, batched: bool) -> None:
         """Test that the example in `docs/auth_chain_difference_algorithm.md`
         works.
         """
@@ -46,6 +56,7 @@ class EventChainStoreTestCase(HomeserverTestCase):
         event_factory = self.hs.get_event_builder_factory()
         bob = "@creator:test"
         alice = "@alice:test"
+        charlie = "@charlie:test"
         room_id = "!room:test"
 
         # Ensure that we have a rooms entry so that we generate the chain index.
@@ -184,6 +195,26 @@ class EventChainStoreTestCase(HomeserverTestCase):
             )
         )
 
+        charlie_invite = self.get_success(
+            event_factory.for_room_version(
+                RoomVersions.V6,
+                {
+                    "type": EventTypes.Member,
+                    "state_key": charlie,
+                    "sender": alice,
+                    "room_id": room_id,
+                    "content": {"tag": "charlie_invite"},
+                },
+            ).build(
+                prev_event_ids=[],
+                auth_event_ids=[
+                    create.event_id,
+                    alice_join2.event_id,
+                    power_2.event_id,
+                ],
+            )
+        )
+
         events = [
             create,
             bob_join,
@@ -193,33 +224,41 @@ class EventChainStoreTestCase(HomeserverTestCase):
             bob_join_2,
             power_2,
             alice_join2,
+            charlie_invite,
         ]
 
         expected_links = [
             (bob_join, create),
-            (power, create),
             (power, bob_join),
-            (alice_invite, create),
             (alice_invite, power),
-            (alice_invite, bob_join),
             (bob_join_2, power),
             (alice_join2, power_2),
+            (charlie_invite, alice_join2),
         ]
 
-        self.persist(events)
+        # We either persist as a batch or one-by-one depending on test
+        # parameter.
+        if batched:
+            self.persist(events)
+        else:
+            for event in events:
+                self.persist([event])
+
         chain_map, link_map = self.fetch_chains(events)
 
         # Check that the expected links and only the expected links have been
         # added.
-        self.assertEqual(len(expected_links), len(list(link_map.get_additions())))
+        event_map = {e.event_id: e for e in events}
+        reverse_chain_map = {v: event_map[k] for k, v in chain_map.items()}
 
-        for start, end in expected_links:
-            start_id, start_seq = chain_map[start.event_id]
-            end_id, end_seq = chain_map[end.event_id]
-
-            self.assertIn(
-                (start_seq, end_seq), list(link_map.get_links_between(start_id, end_id))
-            )
+        self.maxDiff = None
+        self.assertCountEqual(
+            expected_links,
+            [
+                (reverse_chain_map[(s1, s2)], reverse_chain_map[(t1, t2)])
+                for s1, s2, t1, t2 in link_map.get_additions()
+            ],
+        )
 
         # Test that everything can reach the create event, but the create event
         # can't reach anything.
@@ -361,24 +400,23 @@ class EventChainStoreTestCase(HomeserverTestCase):
 
         expected_links = [
             (bob_join, create),
-            (power, create),
             (power, bob_join),
-            (alice_invite, create),
             (alice_invite, power),
-            (alice_invite, bob_join),
         ]
 
         # Check that the expected links and only the expected links have been
         # added.
-        self.assertEqual(len(expected_links), len(list(link_map.get_additions())))
+        event_map = {e.event_id: e for e in events}
+        reverse_chain_map = {v: event_map[k] for k, v in chain_map.items()}
 
-        for start, end in expected_links:
-            start_id, start_seq = chain_map[start.event_id]
-            end_id, end_seq = chain_map[end.event_id]
-
-            self.assertIn(
-                (start_seq, end_seq), list(link_map.get_links_between(start_id, end_id))
-            )
+        self.maxDiff = None
+        self.assertCountEqual(
+            expected_links,
+            [
+                (reverse_chain_map[(s1, s2)], reverse_chain_map[(t1, t2)])
+                for s1, s2, t1, t2 in link_map.get_additions()
+            ],
+        )
 
     def persist(
         self,
@@ -389,6 +427,7 @@ class EventChainStoreTestCase(HomeserverTestCase):
         """
 
         persist_events_store = self.hs.get_datastores().persist_events
+        assert persist_events_store is not None
 
         for e in events:
             e.internal_metadata.stream_ordering = self._next_stream_ordering
@@ -397,9 +436,13 @@ class EventChainStoreTestCase(HomeserverTestCase):
         def _persist(txn: LoggingTransaction) -> None:
             # We need to persist the events to the events and state_events
             # tables.
+            assert persist_events_store is not None
             persist_events_store._store_event_txn(
                 txn,
-                [(e, EventContext(self.hs.get_storage_controllers())) for e in events],
+                [
+                    (e, EventContext(self.hs.get_storage_controllers(), {}))
+                    for e in events
+                ],
             )
 
             # Actually call the function that calculates the auth chain stuff.
@@ -415,43 +458,54 @@ class EventChainStoreTestCase(HomeserverTestCase):
     def fetch_chains(
         self, events: List[EventBase]
     ) -> Tuple[Dict[str, Tuple[int, int]], _LinkMap]:
-
         # Fetch the map from event ID -> (chain ID, sequence number)
-        rows = self.get_success(
-            self.store.db_pool.simple_select_many_batch(
-                table="event_auth_chains",
-                column="event_id",
-                iterable=[e.event_id for e in events],
-                retcols=("event_id", "chain_id", "sequence_number"),
-                keyvalues={},
-            )
+        rows = cast(
+            List[Tuple[str, int, int]],
+            self.get_success(
+                self.store.db_pool.simple_select_many_batch(
+                    table="event_auth_chains",
+                    column="event_id",
+                    iterable=[e.event_id for e in events],
+                    retcols=("event_id", "chain_id", "sequence_number"),
+                    keyvalues={},
+                )
+            ),
         )
 
         chain_map = {
-            row["event_id"]: (row["chain_id"], row["sequence_number"]) for row in rows
+            event_id: (chain_id, sequence_number)
+            for event_id, chain_id, sequence_number in rows
         }
 
         # Fetch all the links and pass them to the _LinkMap.
-        rows = self.get_success(
-            self.store.db_pool.simple_select_many_batch(
-                table="event_auth_chain_links",
-                column="origin_chain_id",
-                iterable=[chain_id for chain_id, _ in chain_map.values()],
-                retcols=(
-                    "origin_chain_id",
-                    "origin_sequence_number",
-                    "target_chain_id",
-                    "target_sequence_number",
-                ),
-                keyvalues={},
-            )
+        auth_chain_rows = cast(
+            List[Tuple[int, int, int, int]],
+            self.get_success(
+                self.store.db_pool.simple_select_many_batch(
+                    table="event_auth_chain_links",
+                    column="origin_chain_id",
+                    iterable=[chain_id for chain_id, _ in chain_map.values()],
+                    retcols=(
+                        "origin_chain_id",
+                        "origin_sequence_number",
+                        "target_chain_id",
+                        "target_sequence_number",
+                    ),
+                    keyvalues={},
+                )
+            ),
         )
 
         link_map = _LinkMap()
-        for row in rows:
+        for (
+            origin_chain_id,
+            origin_sequence_number,
+            target_chain_id,
+            target_sequence_number,
+        ) in auth_chain_rows:
             added = link_map.add_link(
-                (row["origin_chain_id"], row["origin_sequence_number"]),
-                (row["target_chain_id"], row["target_sequence_number"]),
+                (origin_chain_id, origin_sequence_number),
+                (target_chain_id, target_sequence_number),
             )
 
             # We shouldn't have persisted any redundant links
@@ -466,8 +520,6 @@ class LinkMapTestCase(unittest.TestCase):
         link_map = _LinkMap()
 
         link_map.add_link((1, 1), (2, 1), new=False)
-        self.assertCountEqual(link_map.get_links_between(1, 2), [(1, 1)])
-        self.assertCountEqual(link_map.get_links_from((1, 1)), [(2, 1)])
         self.assertCountEqual(link_map.get_additions(), [])
         self.assertTrue(link_map.exists_path_from((1, 5), (2, 1)))
         self.assertFalse(link_map.exists_path_from((1, 5), (2, 2)))
@@ -476,21 +528,33 @@ class LinkMapTestCase(unittest.TestCase):
 
         # Attempting to add a redundant link is ignored.
         self.assertFalse(link_map.add_link((1, 4), (2, 1)))
-        self.assertCountEqual(link_map.get_links_between(1, 2), [(1, 1)])
+        self.assertCountEqual(link_map.get_additions(), [])
 
         # Adding new non-redundant links works
         self.assertTrue(link_map.add_link((1, 3), (2, 3)))
-        self.assertCountEqual(link_map.get_links_between(1, 2), [(1, 1), (3, 3)])
+        self.assertCountEqual(link_map.get_additions(), [(1, 3, 2, 3)])
 
         self.assertTrue(link_map.add_link((2, 5), (1, 3)))
-        self.assertCountEqual(link_map.get_links_between(2, 1), [(5, 3)])
-        self.assertCountEqual(link_map.get_links_between(1, 2), [(1, 1), (3, 3)])
-
         self.assertCountEqual(link_map.get_additions(), [(1, 3, 2, 3), (2, 5, 1, 3)])
+
+    def test_exists_path_from(self) -> None:
+        "Check that `exists_path_from` can handle non-direct links"
+        link_map = _LinkMap()
+
+        link_map.add_link((1, 1), (2, 1), new=False)
+        link_map.add_link((2, 1), (3, 1), new=False)
+
+        self.assertTrue(link_map.exists_path_from((1, 4), (3, 1)))
+        self.assertFalse(link_map.exists_path_from((1, 4), (3, 2)))
+
+        link_map.add_link((1, 5), (2, 3), new=False)
+        link_map.add_link((2, 2), (3, 3), new=False)
+
+        self.assertTrue(link_map.exists_path_from((1, 6), (3, 2)))
+        self.assertFalse(link_map.exists_path_from((1, 4), (3, 2)))
 
 
 class EventChainBackgroundUpdateTestCase(HomeserverTestCase):
-
     servlets = [
         admin.register_servlets,
         room.register_servlets,
@@ -522,7 +586,7 @@ class EventChainBackgroundUpdateTestCase(HomeserverTestCase):
         latest_event_ids = self.get_success(
             self.store.get_prev_events_for_room(room_id)
         )
-        event, context = self.get_success(
+        event, unpersisted_context = self.get_success(
             event_handler.create_event(
                 self.requester,
                 {
@@ -535,14 +599,17 @@ class EventChainBackgroundUpdateTestCase(HomeserverTestCase):
                 prev_event_ids=latest_event_ids,
             )
         )
+        context = self.get_success(unpersisted_context.persist(event))
         self.get_success(
             event_handler.handle_new_client_event(
                 self.requester, events_and_context=[(event, context)]
             )
         )
-        state1 = set(self.get_success(context.get_current_state_ids()).values())
+        state_ids1 = self.get_success(context.get_current_state_ids())
+        assert state_ids1 is not None
+        state1 = set(state_ids1.values())
 
-        event, context = self.get_success(
+        event, unpersisted_context = self.get_success(
             event_handler.create_event(
                 self.requester,
                 {
@@ -555,12 +622,15 @@ class EventChainBackgroundUpdateTestCase(HomeserverTestCase):
                 prev_event_ids=latest_event_ids,
             )
         )
+        context = self.get_success(unpersisted_context.persist(event))
         self.get_success(
             event_handler.handle_new_client_event(
                 self.requester, events_and_context=[(event, context)]
             )
         )
-        state2 = set(self.get_success(context.get_current_state_ids()).values())
+        state_ids2 = self.get_success(context.get_current_state_ids())
+        assert state_ids2 is not None
+        state2 = set(state_ids2.values())
 
         # Delete the chain cover info.
 
@@ -655,7 +725,7 @@ class EventChainBackgroundUpdateTestCase(HomeserverTestCase):
 
         # Add a bunch of state so that it takes multiple iterations of the
         # background update to process the room.
-        for i in range(0, 150):
+        for i in range(150):
             self.helper.send_state(
                 room_id, event_type="m.test", body={"index": i}, tok=self.token
             )
@@ -709,12 +779,12 @@ class EventChainBackgroundUpdateTestCase(HomeserverTestCase):
 
         # Add a bunch of state so that it takes multiple iterations of the
         # background update to process the room.
-        for i in range(0, 150):
+        for i in range(150):
             self.helper.send_state(
                 room_id1, event_type="m.test", body={"index": i}, tok=self.token
             )
 
-        for i in range(0, 150):
+        for i in range(150):
             self.helper.send_state(
                 room_id2, event_type="m.test", body={"index": i}, tok=self.token
             )

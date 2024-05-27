@@ -1,18 +1,24 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """An interactive script for doing a release. See `cli()` below.
 """
@@ -27,7 +33,7 @@ import time
 import urllib.request
 from os import path
 from tempfile import TemporaryDirectory
-from typing import Any, List, Optional
+from typing import Any, List, Match, Optional, Union
 
 import attr
 import click
@@ -233,7 +239,7 @@ def _prepare() -> None:
     subprocess.check_output(["poetry", "version", new_version])
 
     # Generate changelogs.
-    generate_and_write_changelog(current_version, new_version)
+    generate_and_write_changelog(synapse_repo, current_version, new_version)
 
     # Generate debian changelogs
     if parsed_new_version.pre is not None:
@@ -245,11 +251,17 @@ def _prepare() -> None:
     else:
         debian_version = new_version
 
-    run_until_successful(
-        f'dch -M -v {debian_version} "New Synapse release {new_version}."',
-        shell=True,
-    )
-    run_until_successful('dch -M -r -D stable ""', shell=True)
+    if sys.platform == "darwin":
+        run_until_successful(
+            f"docker run --rm -v .:/synapse ubuntu:latest /synapse/scripts-dev/docker_update_debian_changelog.sh {new_version}",
+            shell=True,
+        )
+    else:
+        run_until_successful(
+            f'dch -M -v {debian_version} "New Synapse release {new_version}."',
+            shell=True,
+        )
+        run_until_successful('dch -M -r -D stable ""', shell=True)
 
     # Show the user the changes and ask if they want to edit the change log.
     synapse_repo.git.add("-u")
@@ -280,9 +292,9 @@ def _prepare() -> None:
     )
 
     print("Opening the changelog in your browser...")
-    print("Please ask others to give it a check.")
+    print("Please ask #synapse-dev to give it a check.")
     click.launch(
-        f"https://github.com/matrix-org/synapse/blob/{synapse_repo.active_branch.name}/CHANGES.md"
+        f"https://github.com/element-hq/synapse/blob/{synapse_repo.active_branch.name}/CHANGES.md"
     )
 
 
@@ -350,18 +362,18 @@ def _tag(gh_token: Optional[str]) -> None:
             print("As this is an RC, remember to mark it as a pre-release!")
         print("(by the way, this step can be automated by passing --gh-token,")
         print("or one of the GH_TOKEN or GITHUB_TOKEN env vars.)")
-        click.launch(f"https://github.com/matrix-org/synapse/releases/edit/{tag_name}")
+        click.launch(f"https://github.com/element-hq/synapse/releases/edit/{tag_name}")
 
         print("Once done, you need to wait for the release assets to build.")
         if click.confirm("Launch the release assets actions page?", default=True):
             click.launch(
-                f"https://github.com/matrix-org/synapse/actions?query=branch%3A{tag_name}"
+                f"https://github.com/element-hq/synapse/actions?query=branch%3A{tag_name}"
             )
         return
 
     # Create a new draft release
     gh = Github(gh_token)
-    gh_repo = gh.get_repo("matrix-org/synapse")
+    gh_repo = gh.get_repo("element-hq/synapse")
     release = gh_repo.create_git_release(
         tag=tag_name,
         name=tag_name,
@@ -374,7 +386,7 @@ def _tag(gh_token: Optional[str]) -> None:
     print("Launching the release page and the actions page.")
     click.launch(release.html_url)
     click.launch(
-        f"https://github.com/matrix-org/synapse/actions?query=branch%3A{tag_name}"
+        f"https://github.com/element-hq/synapse/actions?query=branch%3A{tag_name}"
     )
 
     click.echo("Wait for release assets to be built")
@@ -400,7 +412,7 @@ def _publish(gh_token: str) -> None:
 
     # Publish the draft release
     gh = Github(gh_token)
-    gh_repo = gh.get_repo("matrix-org/synapse")
+    gh_repo = gh.get_repo("element-hq/synapse")
     for release in gh_repo.get_releases():
         if release.title == tag_name:
             break
@@ -438,12 +450,12 @@ def _upload(gh_token: Optional[str]) -> None:
     repo = get_repo_and_check_clean_checkout()
     tag = repo.tag(f"refs/tags/{tag_name}")
     if repo.head.commit != tag.commit:
-        click.echo("Tag {tag_name} (tag.commit) is not currently checked out!")
+        click.echo(f"Tag {tag_name} ({tag.commit}) is not currently checked out!")
         click.get_current_context().abort()
 
     # Query all the assets corresponding to this release.
     gh = Github(gh_token)
-    gh_repo = gh.get_repo("matrix-org/synapse")
+    gh_repo = gh.get_repo("element-hq/synapse")
     gh_release = gh_repo.get_release(tag_name)
 
     all_assets = set(gh_release.get_assets())
@@ -532,7 +544,7 @@ def _wait_for_actions(gh_token: Optional[str]) -> None:
 
     # Authentication is optional on this endpoint,
     # but use a token if we have one to reduce the chance of being rate-limited.
-    url = f"https://api.github.com/repos/matrix-org/synapse/actions/runs?branch={tag_name}"
+    url = f"https://api.github.com/repos/element-hq/synapse/actions/runs?branch={tag_name}"
     headers = {"Accept": "application/vnd.github+json"}
     if gh_token is not None:
         headers["authorization"] = f"token {gh_token}"
@@ -567,19 +579,27 @@ def _notify(message: str) -> None:
     # for this.
     click.echo(f"\a{message}")
 
+    app_name = "Synapse Release Script"
+
     # Try and run notify-send, but don't raise an Exception if this fails
     # (This is best-effort)
-    # TODO Support other platforms?
-    subprocess.run(
-        [
-            "notify-send",
-            "--app-name",
-            "Synapse Release Script",
-            "--expire-time",
-            "3600000",
-            message,
-        ]
-    )
+    if sys.platform == "darwin":
+        # See https://developer.apple.com/library/archive/documentation/AppleScript/Conceptual/AppleScriptLangGuide/reference/ASLR_cmds.html#//apple_ref/doc/uid/TP40000983-CH216-SW224
+        subprocess.run(
+            f"""osascript -e 'display notification "{message}" with title "{app_name}"'""",
+            shell=True,
+        )
+    else:
+        subprocess.run(
+            [
+                "notify-send",
+                "--app-name",
+                app_name,
+                "--expire-time",
+                "3600000",
+                message,
+            ]
+        )
 
 
 @cli.command()
@@ -639,7 +659,7 @@ def _announce() -> None:
         f"""
 Hi everyone. Synapse {current_version} has just been released.
 
-[notes](https://github.com/matrix-org/synapse/releases/tag/{tag_name}) | \
+[notes](https://github.com/element-hq/synapse/releases/tag/{tag_name}) | \
 [docker](https://hub.docker.com/r/matrixdotorg/synapse/tags?name={tag_name}) | \
 [debs](https://packages.matrix.org/debian/) | \
 [pypi](https://pypi.org/project/matrix-synapse/{current_version}/)"""
@@ -670,7 +690,11 @@ Ask the designated people to do the blog and tweets."""
 def full(gh_token: str) -> None:
     click.echo("1. If this is a security release, read the security wiki page.")
     click.echo("2. Check for any release blockers before proceeding.")
-    click.echo("    https://github.com/matrix-org/synapse/labels/X-Release-Blocker")
+    click.echo("    https://github.com/element-hq/synapse/labels/X-Release-Blocker")
+    click.echo(
+        "3. Check for any other special release notes, including announcements to add to the changelog or special deployment instructions."
+    )
+    click.echo("    See the 'Synapse Maintainer Report'.")
 
     click.confirm("Ready?", abort=True)
 
@@ -814,7 +838,7 @@ def get_changes_for_version(wanted_version: version.Version) -> str:
 
 
 def generate_and_write_changelog(
-    current_version: version.Version, new_version: str
+    repo: Repo, current_version: version.Version, new_version: str
 ) -> None:
     # We do this by getting a draft so that we can edit it before writing to the
     # changelog.
@@ -826,6 +850,10 @@ def generate_and_write_changelog(
     new_changes = result.stdout.decode("utf-8")
     new_changes = new_changes.replace(
         "No significant changes.", f"No significant changes since {current_version}."
+    )
+    new_changes += build_dependabot_changelog(
+        repo,
+        current_version,
     )
 
     # Prepend changes to changelog
@@ -839,6 +867,50 @@ def generate_and_write_changelog(
     # Remove all the news fragments
     for filename in glob.iglob("changelog.d/*.*"):
         os.remove(filename)
+
+
+def build_dependabot_changelog(repo: Repo, current_version: version.Version) -> str:
+    """Summarise dependabot commits between `current_version` and `release_branch`.
+
+    Returns an empty string if there have been no such commits; otherwise outputs a
+    third-level markdown header followed by an unordered list."""
+    last_release_commit = repo.tag("v" + str(current_version)).commit
+    rev_spec = f"{last_release_commit.hexsha}.."
+    commits = list(git.objects.Commit.iter_items(repo, rev_spec))
+    messages = []
+    for commit in reversed(commits):
+        if commit.author.name == "dependabot[bot]":
+            message: Union[str, bytes] = commit.message
+            if isinstance(message, bytes):
+                message = message.decode("utf-8")
+            messages.append(message.split("\n", maxsplit=1)[0])
+
+    if not messages:
+        print(f"No dependabot commits in range {rev_spec}", file=sys.stderr)
+        return ""
+
+    messages.sort()
+
+    def replacer(match: Match[str]) -> str:
+        desc = match.group(1)
+        number = match.group(2)
+        return f"* {desc}. ([\\#{number}](https://github.com/element-hq/synapse/issues/{number}))"
+
+    for i, message in enumerate(messages):
+        messages[i] = re.sub(r"(.*) \(#(\d+)\)$", replacer, message)
+    messages.insert(0, "### Updates to locked dependencies\n")
+    # Add an extra blank line to the bottom of the section
+    messages.append("")
+    return "\n".join(messages)
+
+
+@cli.command()
+@click.argument("since")
+def test_dependabot_changelog(since: str) -> None:
+    """Test building the dependabot changelog.
+
+    Summarises all dependabot commits between the SINCE tag and the current git HEAD."""
+    print(build_dependabot_changelog(git.Repo("."), version.Version(since)))
 
 
 if __name__ == "__main__":

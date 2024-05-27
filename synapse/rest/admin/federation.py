@@ -1,23 +1,31 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Tuple
 
-from synapse.api.errors import Codes, NotFoundError, SynapseError
+from synapse.api.constants import Direction
+from synapse.api.errors import NotFoundError, SynapseError
 from synapse.federation.transport.server import Authenticator
-from synapse.http.servlet import RestServlet, parse_integer, parse_string
+from synapse.http.servlet import RestServlet, parse_enum, parse_integer, parse_string
 from synapse.http.site import SynapseRequest
 from synapse.rest.admin._base import admin_patterns, assert_requester_is_admin
 from synapse.storage.databases.main.transactions import DestinationSortOrder
@@ -53,22 +61,8 @@ class ListDestinationsRestServlet(RestServlet):
     async def on_GET(self, request: SynapseRequest) -> Tuple[int, JsonDict]:
         await assert_requester_is_admin(self._auth, request)
 
-        start = parse_integer(request, "from", default=0)
-        limit = parse_integer(request, "limit", default=100)
-
-        if start < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter from must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
-
-        if limit < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter limit must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
+        start = parse_integer(request, "from", default=0, negative=False)
+        limit = parse_integer(request, "limit", default=100, negative=False)
 
         destination = parse_string(request, "destination")
 
@@ -79,12 +73,24 @@ class ListDestinationsRestServlet(RestServlet):
             allowed_values=[dest.value for dest in DestinationSortOrder],
         )
 
-        direction = parse_string(request, "dir", default="f", allowed_values=("f", "b"))
+        direction = parse_enum(request, "dir", Direction, default=Direction.FORWARDS)
 
         destinations, total = await self._store.get_destinations_paginate(
             start, limit, destination, order_by, direction
         )
-        response = {"destinations": destinations, "total": total}
+        response = {
+            "destinations": [
+                {
+                    "destination": r[0],
+                    "retry_last_ts": r[1] or 0,
+                    "retry_interval": r[2] or 0,
+                    "failure_ts": r[3],
+                    "last_successful_stream_ordering": r[4],
+                }
+                for r in destinations
+            ],
+            "total": total,
+        }
         if (start + limit) < total:
             response["next_token"] = str(start + len(destinations))
 
@@ -175,29 +181,21 @@ class DestinationMembershipRestServlet(RestServlet):
         if not await self._store.is_destination_known(destination):
             raise NotFoundError("Unknown destination")
 
-        start = parse_integer(request, "from", default=0)
-        limit = parse_integer(request, "limit", default=100)
+        start = parse_integer(request, "from", default=0, negative=False)
+        limit = parse_integer(request, "limit", default=100, negative=False)
 
-        if start < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter from must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
-
-        if limit < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter limit must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
-
-        direction = parse_string(request, "dir", default="f", allowed_values=("f", "b"))
+        direction = parse_enum(request, "dir", Direction, default=Direction.FORWARDS)
 
         rooms, total = await self._store.get_destination_rooms_paginate(
             destination, start, limit, direction
         )
-        response = {"rooms": rooms, "total": total}
+        response = {
+            "rooms": [
+                {"room_id": room_id, "stream_ordering": stream_ordering}
+                for room_id, stream_ordering in rooms
+            ],
+            "total": total,
+        }
         if (start + limit) < total:
             response["next_token"] = str(start + len(rooms))
 

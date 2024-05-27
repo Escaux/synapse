@@ -1,20 +1,28 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Union
 
+from synapse.logging.opentracing import tag_args, trace
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import (
     DatabasePool,
@@ -40,6 +48,8 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     updates.
     """
 
+    @trace
+    @tag_args
     def _count_state_group_hops_txn(
         self, txn: LoggingTransaction, state_group: int
     ) -> int:
@@ -83,12 +93,26 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
             return count
 
+    @trace
+    @tag_args
     def _get_state_groups_from_groups_txn(
         self,
         txn: LoggingTransaction,
         groups: List[int],
         state_filter: Optional[StateFilter] = None,
     ) -> Mapping[int, StateMap[str]]:
+        """
+        Given a number of state groups, fetch the latest state for each group.
+
+        Args:
+            txn: The transaction object.
+            groups: The given state groups that you want to fetch the latest state for.
+            state_filter: The state filter to apply the state we fetch state from the database.
+
+        Returns:
+            Map from state_group to a StateMap at that point.
+        """
+
         state_filter = state_filter or StateFilter.all()
 
         results: Dict[int, MutableStateMap[str]] = {group: {} for group in groups}
@@ -201,8 +225,10 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             if where_clause:
                 where_clause = " AND (%s)" % (where_clause,)
 
-            # We don't use WITH RECURSIVE on sqlite3 as there are distributions
-            # that ship with an sqlite3 version that doesn't support it (e.g. wheezy)
+            # XXX: We could `WITH RECURSIVE` here since it's supported on SQLite 3.8.3
+            # or higher and our minimum supported version is greater than that.
+            #
+            # We just haven't put in the time to refactor this.
             for group in groups:
                 next_group: Optional[int] = group
 
@@ -251,11 +277,20 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
 
 class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
-
     STATE_GROUP_DEDUPLICATION_UPDATE_NAME = "state_group_state_deduplication"
     STATE_GROUP_INDEX_UPDATE_NAME = "state_group_state_type_index"
     STATE_GROUPS_ROOM_INDEX_UPDATE_NAME = "state_groups_room_id_idx"
     STATE_GROUP_EDGES_UNIQUE_INDEX_UPDATE_NAME = "state_group_edges_unique_idx"
+
+    CURRENT_STATE_EVENTS_STREAM_ORDERING_INDEX_UPDATE_NAME = (
+        "current_state_events_stream_ordering_idx"
+    )
+    ROOM_MEMBERSHIPS_STREAM_ORDERING_INDEX_UPDATE_NAME = (
+        "room_memberships_stream_ordering_idx"
+    )
+    LOCAL_CURRENT_MEMBERSHIP_STREAM_ORDERING_INDEX_UPDATE_NAME = (
+        "local_current_membership_stream_ordering_idx"
+    )
 
     def __init__(
         self,
@@ -293,6 +328,27 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
             replaces_index="state_group_edges_idx",
         )
 
+        # These indices are needed to validate the foreign key constraint
+        # when events are deleted.
+        self.db_pool.updates.register_background_index_update(
+            self.CURRENT_STATE_EVENTS_STREAM_ORDERING_INDEX_UPDATE_NAME,
+            index_name="current_state_events_stream_ordering_idx",
+            table="current_state_events",
+            columns=["event_stream_ordering"],
+        )
+        self.db_pool.updates.register_background_index_update(
+            self.ROOM_MEMBERSHIPS_STREAM_ORDERING_INDEX_UPDATE_NAME,
+            index_name="room_memberships_stream_ordering_idx",
+            table="room_memberships",
+            columns=["event_stream_ordering"],
+        )
+        self.db_pool.updates.register_background_index_update(
+            self.LOCAL_CURRENT_MEMBERSHIP_STREAM_ORDERING_INDEX_UPDATE_NAME,
+            index_name="local_current_membership_stream_ordering_idx",
+            table="local_current_membership",
+            columns=["event_stream_ordering"],
+        )
+
     async def _background_deduplicate_state(
         self, progress: dict, batch_size: int
     ) -> int:
@@ -310,7 +366,6 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
         if max_group is None:
             rows = await self.db_pool.execute(
                 "_background_deduplicate_state",
-                None,
                 "SELECT coalesce(max(id), 0) FROM state_groups",
             )
             max_group = rows[0][0]
@@ -444,7 +499,7 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
             conn.rollback()
             if isinstance(self.database_engine, PostgresEngine):
                 # postgres insists on autocommit for the index
-                conn.set_session(autocommit=True)
+                conn.engine.attempt_to_set_autocommit(conn.conn, True)
                 try:
                     txn = conn.cursor()
                     txn.execute(
@@ -453,7 +508,7 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
                     )
                     txn.execute("DROP INDEX IF EXISTS state_groups_state_id")
                 finally:
-                    conn.set_session(autocommit=False)
+                    conn.engine.attempt_to_set_autocommit(conn.conn, False)
             else:
                 txn = conn.cursor()
                 txn.execute(

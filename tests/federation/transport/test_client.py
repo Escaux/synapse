@@ -1,24 +1,33 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import json
+from typing import List, Optional
 from unittest.mock import Mock
 
 import ijson.common
 
 from synapse.api.room_versions import RoomVersions
 from synapse.federation.transport.client import SendJoinParser
+from synapse.types import JsonDict
 from synapse.util import ExceptionBundle
 
 from tests.unittest import TestCase
@@ -66,38 +75,44 @@ class SendJoinParserTestCase(TestCase):
         self.assertEqual(len(parsed_response.state), 1, parsed_response)
         self.assertEqual(parsed_response.event_dict, {}, parsed_response)
         self.assertIsNone(parsed_response.event, parsed_response)
-        self.assertFalse(parsed_response.partial_state, parsed_response)
+        self.assertFalse(parsed_response.members_omitted, parsed_response)
         self.assertEqual(parsed_response.servers_in_room, None, parsed_response)
 
     def test_partial_state(self) -> None:
-        """Check that the partial_state flag is correctly parsed"""
-        parser = SendJoinParser(RoomVersions.V1, False)
-        response = {
-            "org.matrix.msc3706.partial_state": True,
-        }
+        """Check that the members_omitted flag is correctly parsed"""
 
-        serialised_response = json.dumps(response).encode()
+        def parse(response: JsonDict) -> bool:
+            parser = SendJoinParser(RoomVersions.V1, False)
+            serialised_response = json.dumps(response).encode()
 
-        # Send data to the parser
-        parser.write(serialised_response)
+            # Send data to the parser
+            parser.write(serialised_response)
 
-        # Retrieve and check the parsed SendJoinResponse
-        parsed_response = parser.finish()
-        self.assertTrue(parsed_response.partial_state)
+            # Retrieve and check the parsed SendJoinResponse
+            parsed_response = parser.finish()
+            return parsed_response.members_omitted
+
+        self.assertTrue(parse({"members_omitted": True}))
+        self.assertFalse(parse({"members_omitted": False}))
 
     def test_servers_in_room(self) -> None:
         """Check that the servers_in_room field is correctly parsed"""
-        parser = SendJoinParser(RoomVersions.V1, False)
-        response = {"org.matrix.msc3706.servers_in_room": ["hs1", "hs2"]}
 
-        serialised_response = json.dumps(response).encode()
+        def parse(response: JsonDict) -> Optional[List[str]]:
+            parser = SendJoinParser(RoomVersions.V1, False)
+            serialised_response = json.dumps(response).encode()
 
-        # Send data to the parser
-        parser.write(serialised_response)
+            # Send data to the parser
+            parser.write(serialised_response)
 
-        # Retrieve and check the parsed SendJoinResponse
-        parsed_response = parser.finish()
-        self.assertEqual(parsed_response.servers_in_room, ["hs1", "hs2"])
+            # Retrieve and check the parsed SendJoinResponse
+            parsed_response = parser.finish()
+            return parsed_response.servers_in_room
+
+        self.assertEqual(parse({"servers_in_room": ["example.com"]}), ["example.com"])
+
+        # We should be able to tell the field is not present.
+        self.assertEqual(parse({}), None)
 
     def test_errors_closing_coroutines(self) -> None:
         """Check we close all coroutines, even if closing the first raises an Exception.
@@ -106,7 +121,7 @@ class SendJoinParserTestCase(TestCase):
         assertions about its attributes or type.
         """
         parser = SendJoinParser(RoomVersions.V1, False)
-        response = {"org.matrix.msc3706.servers_in_room": ["hs1", "hs2"]}
+        response = {"servers_in_room": ["hs1", "hs2"]}
         serialisation = json.dumps(response).encode()
 
         # Mock the coroutines managed by this parser.

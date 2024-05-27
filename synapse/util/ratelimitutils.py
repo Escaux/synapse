@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import collections
 import contextlib
@@ -20,18 +27,20 @@ import typing
 from typing import (
     Any,
     Callable,
+    ContextManager,
     DefaultDict,
     Dict,
     Iterator,
     List,
     Mapping,
+    MutableSet,
     Optional,
     Set,
     Tuple,
 )
+from weakref import WeakSet
 
 from prometheus_client.core import Counter
-from typing_extensions import ContextManager
 
 from twisted.internet import defer
 
@@ -86,7 +95,9 @@ queue_wait_timer = Histogram(
 )
 
 
-_rate_limiter_instances: Set["FederationRateLimiter"] = set()
+# This must be a `WeakSet`, otherwise we indirectly hold on to entire `HomeServer`s
+# during trial test runs and leak a lot of memory.
+_rate_limiter_instances: MutableSet["FederationRateLimiter"] = WeakSet()
 # Protects the _rate_limiter_instances set from concurrent access
 _rate_limiter_instances_lock = threading.Lock()
 
@@ -166,9 +177,9 @@ class FederationRateLimiter:
                 clock=clock, config=config, metrics_name=metrics_name
             )
 
-        self.ratelimiters: DefaultDict[
-            str, "_PerHostRatelimiter"
-        ] = collections.defaultdict(new_limiter)
+        self.ratelimiters: DefaultDict[str, "_PerHostRatelimiter"] = (
+            collections.defaultdict(new_limiter)
+        )
 
         with _rate_limiter_instances_lock:
             _rate_limiter_instances.add(self)
@@ -287,7 +298,8 @@ class _PerHostRatelimiter:
             if self.metrics_name:
                 rate_limit_reject_counter.labels(self.metrics_name).inc()
             raise LimitExceededError(
-                retry_after_ms=int(self.window_size / self.sleep_limit)
+                limiter_name="rc_federation",
+                retry_after_ms=int(self.window_size / self.sleep_limit),
             )
 
         self.request_times.append(time_now)
@@ -364,12 +376,22 @@ class _PerHostRatelimiter:
 
     def _on_exit(self, request_id: object) -> None:
         logger.debug("Ratelimit(%s) [%s]: Processed req", self.host, id(request_id))
-        self.current_processing.discard(request_id)
-        try:
-            # start processing the next item on the queue.
-            _, deferred = self.ready_request_queue.popitem(last=False)
 
-            with PreserveLoggingContext():
-                deferred.callback(None)
-        except KeyError:
-            pass
+        # When requests complete synchronously, we will recursively start the next
+        # request in the queue. To avoid stack exhaustion, we defer starting the next
+        # request until the next reactor tick.
+
+        def start_next_request() -> None:
+            # We only remove the completed request from the list when we're about to
+            # start the next one, otherwise we can allow extra requests through.
+            self.current_processing.discard(request_id)
+            try:
+                # start processing the next item on the queue.
+                _, deferred = self.ready_request_queue.popitem(last=False)
+
+                with PreserveLoggingContext():
+                    deferred.callback(None)
+            except KeyError:
+                pass
+
+        self.clock.call_later(0.0, start_next_request)

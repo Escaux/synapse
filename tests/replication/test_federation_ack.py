@@ -1,23 +1,34 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from unittest import mock
+
+from twisted.test.proto_helpers import MemoryReactor
 
 from synapse.app.generic_worker import GenericWorkerServer
 from synapse.replication.tcp.commands import FederationAckCommand
 from synapse.replication.tcp.protocol import IReplicationConnection
 from synapse.replication.tcp.streams.federation import FederationStream
+from synapse.server import HomeServer
+from synapse.util import Clock
 
 from tests.unittest import HomeserverTestCase
 
@@ -28,14 +39,13 @@ class FederationAckTestCase(HomeserverTestCase):
         config["worker_app"] = "synapse.app.generic_worker"
         config["worker_name"] = "federation_sender1"
         config["federation_sender_instances"] = ["federation_sender1"]
+        config["instance_map"] = {"main": {"host": "127.0.0.1", "port": 0}}
         return config
 
-    def make_homeserver(self, reactor, clock):
-        hs = self.setup_test_homeserver(homeserver_to_use=GenericWorkerServer)
+    def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
+        return self.setup_test_homeserver(homeserver_to_use=GenericWorkerServer)
 
-        return hs
-
-    def test_federation_ack_sent(self):
+    def test_federation_ack_sent(self) -> None:
         """A FEDERATION_ACK should be sent back after each RDATA federation
 
         This test checks that the federation sender is correctly sending back

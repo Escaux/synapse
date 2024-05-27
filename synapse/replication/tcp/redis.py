@@ -1,23 +1,35 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, Generic, List, Optional, Type, TypeVar, cast
 
 import attr
-import txredisapi
+from txredisapi import (
+    ConnectionHandler,
+    RedisFactory,
+    SubscriberProtocol,
+    UnixConnectionHandler,
+)
 from zope.interface import implementer
 
 from twisted.internet.address import IPv4Address, IPv6Address
@@ -35,6 +47,7 @@ from synapse.replication.tcp.commands import (
     ReplicateCommand,
     parse_command_from_line,
 )
+from synapse.replication.tcp.context import ClientContextFactory
 from synapse.replication.tcp.protocol import (
     IReplicationConnection,
     tcp_inbound_commands_counter,
@@ -67,7 +80,7 @@ class ConstantProperty(Generic[T, V]):
 
 
 @implementer(IReplicationConnection)
-class RedisSubscriber(txredisapi.SubscriberProtocol):
+class RedisSubscriber(SubscriberProtocol):
     """Connection to redis subscribed to replication stream.
 
     This class fulfils two functions:
@@ -94,7 +107,7 @@ class RedisSubscriber(txredisapi.SubscriberProtocol):
     synapse_handler: "ReplicationCommandHandler"
     synapse_stream_prefix: str
     synapse_channel_names: List[str]
-    synapse_outbound_redis_connection: txredisapi.ConnectionHandler
+    synapse_outbound_redis_connection: ConnectionHandler
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
@@ -135,7 +148,7 @@ class RedisSubscriber(txredisapi.SubscriberProtocol):
         # We send out our positions when there is a new connection in case the
         # other side missed updates. We do this for Redis connections as the
         # otherside won't know we've connected and so won't issue a REPLICATE.
-        self.synapse_handler.send_positions_to_connection(self)
+        self.synapse_handler.send_positions_to_connection()
 
     def messageReceived(self, pattern: str, channel: str, message: str) -> None:
         """Received a message from redis."""
@@ -228,7 +241,7 @@ class RedisSubscriber(txredisapi.SubscriberProtocol):
         )
 
 
-class SynapseRedisFactory(txredisapi.RedisFactory):
+class SynapseRedisFactory(RedisFactory):
     """A subclass of RedisFactory that periodically sends pings to ensure that
     we detect dead connections.
     """
@@ -244,7 +257,7 @@ class SynapseRedisFactory(txredisapi.RedisFactory):
         dbid: Optional[int],
         poolsize: int,
         isLazy: bool = False,
-        handler: Type = txredisapi.ConnectionHandler,
+        handler: Type = ConnectionHandler,
         charset: str = "utf-8",
         password: Optional[str] = None,
         replyTimeout: int = 30,
@@ -325,10 +338,9 @@ class RedisDirectTcpReplicationClientFactory(SynapseRedisFactory):
     def __init__(
         self,
         hs: "HomeServer",
-        outbound_redis_connection: txredisapi.ConnectionHandler,
+        outbound_redis_connection: ConnectionHandler,
         channel_names: List[str],
     ):
-
         super().__init__(
             hs,
             uuid="subscriber",
@@ -368,7 +380,7 @@ def lazyConnection(
     reconnect: bool = True,
     password: Optional[str] = None,
     replyTimeout: int = 30,
-) -> txredisapi.ConnectionHandler:
+) -> ConnectionHandler:
     """Creates a connection to Redis that is lazily set up and reconnects if the
     connections is lost.
     """
@@ -380,19 +392,72 @@ def lazyConnection(
         dbid=dbid,
         poolsize=1,
         isLazy=True,
-        handler=txredisapi.ConnectionHandler,
+        handler=ConnectionHandler,
         password=password,
         replyTimeout=replyTimeout,
     )
     factory.continueTrying = reconnect
 
     reactor = hs.get_reactor()
-    reactor.connectTCP(
-        host,
-        port,
+
+    if hs.config.redis.redis_use_tls:
+        ssl_context_factory = ClientContextFactory(hs.config.redis)
+        reactor.connectSSL(
+            host,
+            port,
+            factory,
+            ssl_context_factory,
+            timeout=30,
+            bindAddress=None,
+        )
+    else:
+        reactor.connectTCP(
+            host,
+            port,
+            factory,
+            timeout=30,
+            bindAddress=None,
+        )
+
+    return factory.handler
+
+
+def lazyUnixConnection(
+    hs: "HomeServer",
+    path: str = "/tmp/redis.sock",
+    dbid: Optional[int] = None,
+    reconnect: bool = True,
+    password: Optional[str] = None,
+    replyTimeout: int = 30,
+) -> ConnectionHandler:
+    """Creates a connection to Redis that is lazily set up and reconnects if the
+    connection is lost.
+
+    Returns:
+        A subclass of ConnectionHandler, which is a UnixConnectionHandler in this case.
+    """
+
+    uuid = path
+
+    factory = SynapseRedisFactory(
+        hs,
+        uuid=uuid,
+        dbid=dbid,
+        poolsize=1,
+        isLazy=True,
+        handler=UnixConnectionHandler,
+        password=password,
+        replyTimeout=replyTimeout,
+    )
+    factory.continueTrying = reconnect
+
+    reactor = hs.get_reactor()
+
+    reactor.connectUNIX(
+        path,
         factory,
         timeout=30,
-        bindAddress=None,
+        checkPID=False,
     )
 
     return factory.handler

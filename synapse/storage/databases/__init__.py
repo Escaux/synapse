@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, Generic, List, Optional, Type, TypeVar
@@ -45,7 +52,7 @@ class Databases(Generic[DataStoreT]):
     """
 
     databases: List[DatabasePool]
-    main: "DataStore"  # FIXME: #11165: actually an instance of `main_store_class`
+    main: "DataStore"  # FIXME: https://github.com/matrix-org/synapse/issues/11165: actually an instance of `main_store_class`
     state: StateGroupDataStore
     persist_events: Optional[PersistEventsStore]
 
@@ -95,7 +102,7 @@ class Databases(Generic[DataStoreT]):
                     # If we're on a process that can persist events also
                     # instantiate a `PersistEventsStore`
                     if hs.get_instance_name() in hs.config.worker.writers.events:
-                        persist_events = PersistEventsStore(hs, database, main, db_conn)
+                        persist_events = PersistEventsStore(hs, database, main, db_conn)  # type: ignore[arg-type]
 
                 if "state" in database_config.databases:
                     logger.info(
@@ -133,6 +140,6 @@ class Databases(Generic[DataStoreT]):
 
         # We use local variables here to ensure that the databases do not have
         # optional types.
-        self.main = main
+        self.main = main  # type: ignore[assignment]
         self.state = state
         self.persist_events = persist_events

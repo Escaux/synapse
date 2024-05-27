@@ -1,19 +1,27 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
-from typing import TYPE_CHECKING, Any
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, ClassVar, Sequence, Type
 
 from twisted.web.client import PartialDownloadError
 
@@ -27,19 +35,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class UserInteractiveAuthChecker:
+class UserInteractiveAuthChecker(ABC):
     """Abstract base class for an interactive auth checker"""
 
-    def __init__(self, hs: "HomeServer"):
+    # This should really be an "abstract class property", i.e. it should
+    # be an error to instantiate a subclass that doesn't specify an AUTH_TYPE.
+    # But calling this a `ClassVar` is simpler than a decorator stack of
+    # @property @abstractmethod and @classmethod (if that's even the right order).
+    AUTH_TYPE: ClassVar[str]
+
+    def __init__(self, hs: "HomeServer"):  # noqa: B027
         pass
 
+    @abstractmethod
     def is_enabled(self) -> bool:
         """Check if the configuration of the homeserver allows this checker to work
 
         Returns:
             True if this login type is enabled.
         """
+        raise NotImplementedError()
 
+    @abstractmethod
     async def check_auth(self, authdict: dict, clientip: str) -> Any:
         """Given the authentication dict from the client, attempt to check this step
 
@@ -177,9 +194,9 @@ class _BaseThreepidAuthChecker:
 
                 if row:
                     threepid = {
-                        "medium": row["medium"],
-                        "address": row["address"],
-                        "validated_at": row["validated_at"],
+                        "medium": row.medium,
+                        "address": row.address,
+                        "validated_at": row.validated_at,
                     }
 
                     # Valid threepid returned, delete from the db
@@ -304,7 +321,7 @@ class RegistrationTokenAuthChecker(UserInteractiveAuthChecker):
             )
 
 
-INTERACTIVE_AUTH_CHECKERS = [
+INTERACTIVE_AUTH_CHECKERS: Sequence[Type[UserInteractiveAuthChecker]] = [
     DummyAuthChecker,
     TermsAuthChecker,
     RecaptchaAuthChecker,

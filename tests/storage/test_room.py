@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from twisted.test.proto_helpers import MemoryReactor
 
@@ -42,16 +49,9 @@ class RoomStoreTestCase(HomeserverTestCase):
         )
 
     def test_get_room(self) -> None:
-        res = self.get_success(self.store.get_room(self.room.to_string()))
-        assert res is not None
-        self.assertDictContainsSubset(
-            {
-                "room_id": self.room.to_string(),
-                "creator": self.u_creator.to_string(),
-                "is_public": True,
-            },
-            res,
-        )
+        room = self.get_success(self.store.get_room(self.room.to_string()))
+        assert room is not None
+        self.assertTrue(room[0])
 
     def test_get_room_unknown_room(self) -> None:
         self.assertIsNone(self.get_success(self.store.get_room("!uknown:test")))
@@ -59,14 +59,9 @@ class RoomStoreTestCase(HomeserverTestCase):
     def test_get_room_with_stats(self) -> None:
         res = self.get_success(self.store.get_room_with_stats(self.room.to_string()))
         assert res is not None
-        self.assertDictContainsSubset(
-            {
-                "room_id": self.room.to_string(),
-                "creator": self.u_creator.to_string(),
-                "public": True,
-            },
-            res,
-        )
+        self.assertEqual(res.room_id, self.room.to_string())
+        self.assertEqual(res.creator, self.u_creator.to_string())
+        self.assertTrue(res.public)
 
     def test_get_room_with_stats_unknown_room(self) -> None:
         self.assertIsNone(

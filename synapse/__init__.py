@@ -1,31 +1,47 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
+# Copyright 2023 The Matrix.org Foundation C.I.C.
 # Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2018-9 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
-""" This is a reference implementation of a Matrix homeserver.
+""" This is an implementation of a Matrix homeserver.
 """
 
-import json
 import os
 import sys
+from typing import Any, Dict
+
+from PIL import ImageFile
 
 from synapse.util.rust import check_rust_lib_up_to_date
 from synapse.util.stringutils import strtobool
 
+# Allow truncated JPEG images to be thumbnailed.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 # Check that we're not running on an unsupported Python version.
-if sys.version_info < (3, 7):
-    print("Synapse requires Python 3.7 or above.")
+#
+# Note that we use an (unneeded) variable here so that pyupgrade doesn't nuke the
+# if-statement completely.
+py_version = sys.version_info
+if py_version < (3, 8):
+    print("Synapse requires Python 3.8 or above.")
     sys.exit(1)
 
 # Allow using the asyncio reactor via env var.
@@ -60,15 +76,24 @@ try:
 except ImportError:
     pass
 
-# Use the standard library json implementation instead of simplejson.
+# Teach canonicaljson how to serialise immutabledicts.
 try:
-    from canonicaljson import set_json_library
+    from canonicaljson import register_preserialisation_callback
+    from immutabledict import immutabledict
 
-    set_json_library(json)
+    def _immutabledict_cb(d: immutabledict) -> Dict[str, Any]:
+        try:
+            return d._dict
+        except Exception:
+            # Paranoia: fall back to a `dict()` call, in case a future version of
+            # immutabledict removes `_dict` from the implementation.
+            return dict(d)
+
+    register_preserialisation_callback(immutabledict, _immutabledict_cb)
 except ImportError:
     pass
 
-import synapse.util
+import synapse.util  # noqa: E402
 
 __version__ = synapse.util.SYNAPSE_VERSION
 

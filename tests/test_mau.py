@@ -1,25 +1,36 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """Tests REST events for /rooms paths."""
 
-from typing import List
+from typing import List, Optional
+
+from twisted.test.proto_helpers import MemoryReactor
 
 from synapse.api.constants import APP_SERVICE_REGISTRATION_TYPE, LoginType
 from synapse.api.errors import Codes, HttpResponseException, SynapseError
 from synapse.appservice import ApplicationService
 from synapse.rest.client import register, sync
+from synapse.server import HomeServer
+from synapse.types import JsonDict
+from synapse.util import Clock
 
 from tests import unittest
 from tests.unittest import override_config
@@ -27,10 +38,9 @@ from tests.utils import default_config
 
 
 class TestMauLimit(unittest.HomeserverTestCase):
-
     servlets = [register.register_servlets, sync.register_servlets]
 
-    def default_config(self):
+    def default_config(self) -> JsonDict:
         config = default_config("test")
 
         config.update(
@@ -53,10 +63,12 @@ class TestMauLimit(unittest.HomeserverTestCase):
 
         return config
 
-    def prepare(self, reactor, clock, homeserver):
+    def prepare(
+        self, reactor: MemoryReactor, clock: Clock, homeserver: HomeServer
+    ) -> None:
         self.store = homeserver.get_datastores().main
 
-    def test_simple_deny_mau(self):
+    def test_simple_deny_mau(self) -> None:
         # Create and sync so that the MAU counts get updated
         token1 = self.create_user("kermit1")
         self.do_sync_for_user(token1)
@@ -75,7 +87,7 @@ class TestMauLimit(unittest.HomeserverTestCase):
         self.assertEqual(e.code, 403)
         self.assertEqual(e.errcode, Codes.RESOURCE_LIMIT_EXCEEDED)
 
-    def test_as_ignores_mau(self):
+    def test_as_ignores_mau(self) -> None:
         """Test that application services can still create users when the MAU
         limit has been reached. This only works when application service
         user ip tracking is disabled.
@@ -113,7 +125,7 @@ class TestMauLimit(unittest.HomeserverTestCase):
 
         self.create_user("as_kermit4", token=as_token, appservice=True)
 
-    def test_allowed_after_a_month_mau(self):
+    def test_allowed_after_a_month_mau(self) -> None:
         # Create and sync so that the MAU counts get updated
         token1 = self.create_user("kermit1")
         self.do_sync_for_user(token1)
@@ -132,7 +144,7 @@ class TestMauLimit(unittest.HomeserverTestCase):
         self.do_sync_for_user(token3)
 
     @override_config({"mau_trial_days": 1})
-    def test_trial_delay(self):
+    def test_trial_delay(self) -> None:
         # We should be able to register more than the limit initially
         token1 = self.create_user("kermit1")
         self.do_sync_for_user(token1)
@@ -165,7 +177,7 @@ class TestMauLimit(unittest.HomeserverTestCase):
         self.assertEqual(e.errcode, Codes.RESOURCE_LIMIT_EXCEEDED)
 
     @override_config({"mau_trial_days": 1})
-    def test_trial_users_cant_come_back(self):
+    def test_trial_users_cant_come_back(self) -> None:
         self.hs.config.server.mau_trial_days = 1
 
         # We should be able to register more than the limit initially
@@ -216,7 +228,7 @@ class TestMauLimit(unittest.HomeserverTestCase):
         # max_mau_value should not matter
         {"max_mau_value": 1, "limit_usage_by_mau": False, "mau_stats_only": True}
     )
-    def test_tracked_but_not_limited(self):
+    def test_tracked_but_not_limited(self) -> None:
         # Simply being able to create 2 users indicates that the
         # limit was not reached.
         token1 = self.create_user("kermit1")
@@ -236,10 +248,10 @@ class TestMauLimit(unittest.HomeserverTestCase):
             "mau_appservice_trial_days": {"SomeASID": 1, "AnotherASID": 2},
         }
     )
-    def test_as_trial_days(self):
+    def test_as_trial_days(self) -> None:
         user_tokens: List[str] = []
 
-        def advance_time_and_sync():
+        def advance_time_and_sync() -> None:
             self.reactor.advance(24 * 60 * 61)
             for token in user_tokens:
                 self.do_sync_for_user(token)
@@ -300,7 +312,9 @@ class TestMauLimit(unittest.HomeserverTestCase):
             },
         )
 
-    def create_user(self, localpart, token=None, appservice=False):
+    def create_user(
+        self, localpart: str, token: Optional[str] = None, appservice: bool = False
+    ) -> str:
         request_data = {
             "username": localpart,
             "password": "monkey",
@@ -326,7 +340,7 @@ class TestMauLimit(unittest.HomeserverTestCase):
 
         return access_token
 
-    def do_sync_for_user(self, token):
+    def do_sync_for_user(self, token: str) -> None:
         channel = self.make_request("GET", "/sync", access_token=token)
 
         if channel.code != 200:

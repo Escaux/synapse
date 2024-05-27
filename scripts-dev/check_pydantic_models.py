@@ -1,17 +1,24 @@
 #! /usr/bin/env python
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 """
 A script which enforces that Synapse always uses strict types when defining a Pydantic
 model.
@@ -36,11 +43,41 @@ import textwrap
 import traceback
 import unittest.mock
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, List, Set, Type, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    Set,
+    Type,
+    TypeVar,
+)
 
 from parameterized import parameterized
-from pydantic import BaseModel as PydanticBaseModel, conbytes, confloat, conint, constr
-from pydantic.typing import get_args
+
+from synapse._pydantic_compat import HAS_PYDANTIC_V2
+
+if TYPE_CHECKING or HAS_PYDANTIC_V2:
+    from pydantic.v1 import (
+        BaseModel as PydanticBaseModel,
+        conbytes,
+        confloat,
+        conint,
+        constr,
+    )
+    from pydantic.v1.typing import get_args
+else:
+    from pydantic import (
+        BaseModel as PydanticBaseModel,
+        conbytes,
+        confloat,
+        conint,
+        constr,
+    )
+    from pydantic.typing import get_args
+
 from typing_extensions import ParamSpec
 
 logger = logging.getLogger(__name__)
@@ -251,7 +288,10 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                from pydantic import constr
+                try:
+                    from pydantic.v1 import constr
+                except ImportError:
+                    from pydantic import constr
                 constr()
                 """
             )
@@ -269,7 +309,10 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                from pydantic import *
+                try:
+                    from pydantic.v1 import *
+                except ImportError:
+                    from pydantic import *
                 constr()
                 """
             )
@@ -278,7 +321,10 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                from pydantic.types import constr
+                try:
+                    from pydantic.v1.types import constr
+                except ImportError:
+                    from pydantic.types import constr
                 constr()
                 """
             )
@@ -287,8 +333,11 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                import pydantic.types
-                pydantic.types.constr()
+                try:
+                    from pydantic.v1 import types as pydantic_types
+                except ImportError:
+                    from pydantic import types as pydantic_types
+                pydantic_types.constr()
                 """
             )
 
@@ -296,7 +345,10 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                from pydantic import constr
+                try:
+                    from pydantic.v1 import constr
+                except ImportError:
+                    from pydantic import constr
                 constr(min_length=10)
                 """
             )
@@ -305,7 +357,10 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                from pydantic import constr
+                try:
+                    from pydantic.v1 import constr
+                except ImportError:
+                    from pydantic import constr
                 constr(strict=False)
                 """
             )
@@ -314,7 +369,10 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic():
             run_test_snippet(
                 """
-                from pydantic import constr
+                try:
+                    from pydantic.v1 import constr
+                except ImportError:
+                    from pydantic import constr
                 constr(strict=True)
                 """
             )
@@ -323,7 +381,10 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                from pydantic import constr
+                try:
+                    from pydantic.v1 import constr
+                except ImportError:
+                    from pydantic import constr
                 x: constr()
                 """
             )
@@ -332,7 +393,10 @@ class TestConstrainedTypesPatch(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                from pydantic import BaseModel, conint
+                try:
+                    from pydantic.v1 import BaseModel, conint
+                except ImportError:
+                    from pydantic import BaseModel, conint
                 class C:
                     x: conint()
                 """
@@ -361,7 +425,10 @@ class TestFieldTypeInspection(unittest.TestCase):
             run_test_snippet(
                 f"""
                 from typing import *
-                from pydantic import *
+                try:
+                    from pydantic.v1 import *
+                except ImportError:
+                    from pydantic import *
                 class C(BaseModel):
                     f: {annotation}
                 """
@@ -388,7 +455,10 @@ class TestFieldTypeInspection(unittest.TestCase):
             run_test_snippet(
                 f"""
                 from typing import *
-                from pydantic import *
+                try:
+                    from pydantic.v1 import *
+                except ImportError:
+                    from pydantic import *
                 class C(BaseModel):
                     f: {annotation}
                 """
@@ -398,7 +468,10 @@ class TestFieldTypeInspection(unittest.TestCase):
         with monkeypatch_pydantic(), self.assertRaises(ModelCheckerException):
             run_test_snippet(
                 """
-                from pydantic.main import BaseModel
+                try:
+                    from pydantic.v1.main import BaseModel
+                except ImportError:
+                    from pydantic.main import BaseModel
                 class C(BaseModel):
                     f: str
                 """

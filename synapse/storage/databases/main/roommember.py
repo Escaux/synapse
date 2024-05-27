@@ -1,20 +1,27 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2018 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from typing import (
     TYPE_CHECKING,
+    AbstractSet,
     Collection,
     Dict,
     FrozenSet,
@@ -22,9 +29,11 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Sequence,
     Set,
     Tuple,
     Union,
+    cast,
 )
 
 import attr
@@ -47,16 +56,19 @@ from synapse.storage.roommember import (
     ProfileInfo,
     RoomsForUser,
 )
-from synapse.types import JsonDict, PersistedEventPosition, StateMap, get_domain_from_id
-from synapse.util.async_helpers import Linearizer
-from synapse.util.caches import intern_string
+from synapse.types import (
+    JsonDict,
+    PersistedEventPosition,
+    StateMap,
+    StrCollection,
+    get_domain_from_id,
+)
 from synapse.util.caches.descriptors import _CacheContext, cached, cachedList
 from synapse.util.iterutils import batch_iter
 from synapse.util.metrics import Measure
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
-    from synapse.state import _StateCacheEntry
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +85,7 @@ class EventIdMembership:
     membership: str
 
 
-class RoomMemberWorkerStore(EventsWorkerStore):
+class RoomMemberWorkerStore(EventsWorkerStore, CacheInvalidationWorkerStore):
     def __init__(
         self,
         database: DatabasePool,
@@ -81,10 +93,6 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         hs: "HomeServer",
     ):
         super().__init__(database, db_conn, hs)
-
-        # Used by `_get_joined_hosts` to ensure only one thing mutates the cache
-        # at a time. Keyed by room_id.
-        self._joined_host_linearizer = Linearizer("_JoinedHostsCache")
 
         self._server_notices_mxid = hs.config.servernotices.server_notices_mxid
 
@@ -145,7 +153,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         return self._known_servers_count
 
     @cached(max_entries=100000, iterable=True)
-    async def get_users_in_room(self, room_id: str) -> List[str]:
+    async def get_users_in_room(self, room_id: str) -> Sequence[str]:
         """Returns a list of users in the room.
 
         Will return inaccurate results for rooms with partial state, since the state for
@@ -182,9 +190,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         )
 
     @cached()
-    def get_user_in_room_with_profile(
-        self, room_id: str, user_id: str
-    ) -> Dict[str, ProfileInfo]:
+    def get_user_in_room_with_profile(self, room_id: str, user_id: str) -> ProfileInfo:
         raise NotImplementedError()
 
     @cachedList(
@@ -192,7 +198,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
     )
     async def get_subset_users_in_room_with_profiles(
         self, room_id: str, user_ids: Collection[str]
-    ) -> Dict[str, ProfileInfo]:
+    ) -> Mapping[str, ProfileInfo]:
         """Get a mapping from user ID to profile information for a list of users
         in a given room.
 
@@ -238,7 +244,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
     @cached(max_entries=100000, iterable=True)
     async def get_users_in_room_with_profiles(
         self, room_id: str
-    ) -> Dict[str, ProfileInfo]:
+    ) -> Mapping[str, ProfileInfo]:
         """Get a mapping from user ID to profile information for all users in a given room.
 
         The profile information comes directly from this room's `m.room.member`
@@ -276,8 +282,8 @@ class RoomMemberWorkerStore(EventsWorkerStore):
             _get_users_in_room_with_profiles,
         )
 
-    @cached(max_entries=100000)
-    async def get_room_summary(self, room_id: str) -> Dict[str, MemberSummary]:
+    @cached(max_entries=100000)  # type: ignore[synapse-@cached-mutable]
+    async def get_room_summary(self, room_id: str) -> Mapping[str, MemberSummary]:
         """Get the details of a room roughly suitable for use by the room
         summary extension to /sync. Useful when lazy loading room members.
         Args:
@@ -349,7 +355,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
     @cached()
     async def get_invited_rooms_for_local_user(
         self, user_id: str
-    ) -> List[RoomsForUser]:
+    ) -> Sequence[RoomsForUser]:
         """Get all the rooms the *local* user is invited to.
 
         Args:
@@ -361,6 +367,22 @@ class RoomMemberWorkerStore(EventsWorkerStore):
 
         return await self.get_rooms_for_local_user_where_membership_is(
             user_id, [Membership.INVITE]
+        )
+
+    async def get_knocked_at_rooms_for_local_user(
+        self, user_id: str
+    ) -> Sequence[RoomsForUser]:
+        """Get all the rooms the *local* user has knocked at.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            A list of RoomsForUser.
+        """
+
+        return await self.get_rooms_for_local_user_where_membership_is(
+            user_id, [Membership.KNOCK]
         )
 
     async def get_invite_for_local_user_in_room(
@@ -385,7 +407,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         self,
         user_id: str,
         membership_list: Collection[str],
-        excluded_rooms: Optional[List[str]] = None,
+        excluded_rooms: StrCollection = (),
     ) -> List[RoomsForUser]:
         """Get all the rooms for this *local* user where the membership for this user
         matches one in the membership list.
@@ -412,10 +434,16 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         )
 
         # Now we filter out forgotten and excluded rooms
-        rooms_to_exclude: Set[str] = await self.get_forgotten_rooms_for_user(user_id)
+        rooms_to_exclude: AbstractSet[str] = set()
+
+        # Users can't forget joined/invited rooms, so we skip the check for such look ups.
+        if any(m not in (Membership.JOIN, Membership.INVITE) for m in membership_list):
+            rooms_to_exclude = await self.get_forgotten_rooms_for_user(user_id)
 
         if excluded_rooms is not None:
-            rooms_to_exclude.update(set(excluded_rooms))
+            # Take a copy to avoid mutating the in-cache set
+            rooms_to_exclude = set(rooms_to_exclude)
+            rooms_to_exclude.update(excluded_rooms)
 
         return [room for room in rooms if room.room_id not in rooms_to_exclude]
 
@@ -465,7 +493,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         return results
 
     @cached(iterable=True)
-    async def get_local_users_in_room(self, room_id: str) -> List[str]:
+    async def get_local_users_in_room(self, room_id: str) -> Sequence[str]:
         """
         Retrieves a list of the current roommembers who are local to the server.
         """
@@ -474,6 +502,22 @@ class RoomMemberWorkerStore(EventsWorkerStore):
             keyvalues={"room_id": room_id, "membership": Membership.JOIN},
             retcol="user_id",
             desc="get_local_users_in_room",
+        )
+
+    async def get_local_users_related_to_room(
+        self, room_id: str
+    ) -> List[Tuple[str, str]]:
+        """
+        Retrieves a list of the current roommembers who are local to the server and their membership status.
+        """
+        return cast(
+            List[Tuple[str, str]],
+            await self.db_pool.simple_select_list(
+                table="local_current_membership",
+                keyvalues={"room_id": room_id},
+                retcols=("user_id", "membership"),
+                desc="get_local_users_in_room",
+            ),
         )
 
     async def check_local_user_in_room(self, user_id: str, room_id: str) -> bool:
@@ -537,17 +581,20 @@ class RoomMemberWorkerStore(EventsWorkerStore):
                 "non-local user %s" % (user_id,),
             )
 
-        results_dict = await self.db_pool.simple_select_one(
-            "local_current_membership",
-            {"room_id": room_id, "user_id": user_id},
-            ("membership", "event_id"),
-            allow_none=True,
-            desc="get_local_current_membership_for_user_in_room",
+        results = cast(
+            Optional[Tuple[str, str]],
+            await self.db_pool.simple_select_one(
+                "local_current_membership",
+                {"room_id": room_id, "user_id": user_id},
+                ("membership", "event_id"),
+                allow_none=True,
+                desc="get_local_current_membership_for_user_in_room",
+            ),
         )
-        if not results_dict:
+        if not results:
             return None, None
 
-        return results_dict.get("membership"), results_dict.get("event_id")
+        return results
 
     @cached(max_entries=500000, iterable=True)
     async def get_rooms_for_user_with_stream_ordering(
@@ -671,32 +718,35 @@ class RoomMemberWorkerStore(EventsWorkerStore):
     )
     async def _get_rooms_for_users(
         self, user_ids: Collection[str]
-    ) -> Dict[str, FrozenSet[str]]:
+    ) -> Mapping[str, FrozenSet[str]]:
         """A batched version of `get_rooms_for_user`.
 
         Returns:
             Map from user_id to set of rooms that is currently in.
         """
 
-        rows = await self.db_pool.simple_select_many_batch(
-            table="current_state_events",
-            column="state_key",
-            iterable=user_ids,
-            retcols=(
-                "state_key",
-                "room_id",
+        rows = cast(
+            List[Tuple[str, str]],
+            await self.db_pool.simple_select_many_batch(
+                table="current_state_events",
+                column="state_key",
+                iterable=user_ids,
+                retcols=(
+                    "state_key",
+                    "room_id",
+                ),
+                keyvalues={
+                    "type": EventTypes.Member,
+                    "membership": Membership.JOIN,
+                },
+                desc="get_rooms_for_users",
             ),
-            keyvalues={
-                "type": EventTypes.Member,
-                "membership": Membership.JOIN,
-            },
-            desc="get_rooms_for_users",
         )
 
         user_rooms: Dict[str, Set[str]] = {user_id: set() for user_id in user_ids}
 
-        for row in rows:
-            user_rooms[row["state_key"]].add(row["room_id"])
+        for state_key, room_id in rows:
+            user_rooms[state_key].add(room_id)
 
         return {key: frozenset(rooms) for key, rooms in user_rooms.items()}
 
@@ -781,7 +831,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         """Returns the set of users who share a room with `user_id`"""
         room_ids = await self.get_rooms_for_user(user_id)
 
-        user_who_share_room = set()
+        user_who_share_room: Set[str] = set()
         for room_id in room_ids:
             user_ids = await self.get_users_in_room(room_id)
             user_who_share_room.update(user_ids)
@@ -876,7 +926,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
     )
     async def _get_user_ids_from_membership_event_ids(
         self, event_ids: Iterable[str]
-    ) -> Dict[str, Optional[str]]:
+    ) -> Mapping[str, Optional[str]]:
         """For given set of member event_ids check if they point to a join
         event.
 
@@ -887,17 +937,20 @@ class RoomMemberWorkerStore(EventsWorkerStore):
             Map from event ID to `user_id`, or None if event is not a join.
         """
 
-        rows = await self.db_pool.simple_select_many_batch(
-            table="room_memberships",
-            column="event_id",
-            iterable=event_ids,
-            retcols=("user_id", "event_id"),
-            keyvalues={"membership": Membership.JOIN},
-            batch_size=1000,
-            desc="_get_user_ids_from_membership_event_ids",
+        rows = cast(
+            List[Tuple[str, str]],
+            await self.db_pool.simple_select_many_batch(
+                table="room_memberships",
+                column="event_id",
+                iterable=event_ids,
+                retcols=("event_id", "user_id"),
+                keyvalues={"membership": Membership.JOIN},
+                batch_size=1000,
+                desc="_get_user_ids_from_membership_event_ids",
+            ),
         )
 
-        return {row["event_id"]: row["user_id"] for row in rows}
+        return dict(rows)
 
     @cached(max_entries=10000)
     async def is_host_joined(self, room_id: str, host: str) -> bool:
@@ -914,11 +967,10 @@ class RoomMemberWorkerStore(EventsWorkerStore):
             raise Exception("Invalid host name")
 
         sql = """
-            SELECT state_key FROM current_state_events AS c
-            INNER JOIN room_memberships AS m USING (event_id)
-            WHERE m.membership = ?
+            SELECT state_key FROM current_state_events
+            WHERE membership = ?
                 AND type = 'm.room.member'
-                AND c.room_id = ?
+                AND room_id = ?
                 AND state_key LIKE ?
             LIMIT 1
         """
@@ -929,7 +981,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         like_clause = "%:" + host
 
         rows = await self.db_pool.execute(
-            "is_host_joined", None, sql, membership, room_id, like_clause
+            "is_host_joined", sql, membership, room_id, like_clause
         )
 
         if not rows:
@@ -943,7 +995,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         return True
 
     @cached(iterable=True, max_entries=10000)
-    async def get_current_hosts_in_room(self, room_id: str) -> Set[str]:
+    async def get_current_hosts_in_room(self, room_id: str) -> AbstractSet[str]:
         """Get current hosts in room based on current state."""
 
         # First we check if we already have `get_users_in_room` in the cache, as
@@ -980,7 +1032,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         )
 
     @cached(iterable=True, max_entries=10000)
-    async def get_current_hosts_in_room_ordered(self, room_id: str) -> List[str]:
+    async def get_current_hosts_in_room_ordered(self, room_id: str) -> Tuple[str, ...]:
         """
         Get current hosts in room based on current state.
 
@@ -1009,12 +1061,14 @@ class RoomMemberWorkerStore(EventsWorkerStore):
             # `get_users_in_room` rather than funky SQL.
 
             domains = await self.get_current_hosts_in_room(room_id)
-            return list(domains)
+            return tuple(domains)
 
         # For PostgreSQL we can use a regex to pull out the domains from the
         # joined users in `current_state_events` via regex.
 
-        def get_current_hosts_in_room_ordered_txn(txn: LoggingTransaction) -> List[str]:
+        def get_current_hosts_in_room_ordered_txn(
+            txn: LoggingTransaction,
+        ) -> Tuple[str, ...]:
             # Returns a list of servers currently joined in the room sorted by
             # longest in the room first (aka. with the lowest depth). The
             # heuristic of sorting by servers who have been in the room the
@@ -1039,106 +1093,37 @@ class RoomMemberWorkerStore(EventsWorkerStore):
             """
             txn.execute(sql, (room_id,))
             # `server_domain` will be `NULL` for malformed MXIDs with no colons.
-            return [d for d, in txn if d is not None]
+            return tuple(d for d, in txn if d is not None)
 
         return await self.db_pool.runInteraction(
             "get_current_hosts_in_room_ordered", get_current_hosts_in_room_ordered_txn
         )
 
-    async def get_joined_hosts(
-        self, room_id: str, state: StateMap[str], state_entry: "_StateCacheEntry"
-    ) -> FrozenSet[str]:
-        state_group: Union[object, int] = state_entry.state_group
-        if not state_group:
-            # If state_group is None it means it has yet to be assigned a
-            # state group, i.e. we need to make sure that calls with a state_group
-            # of None don't hit previous cached calls with a None state_group.
-            # To do this we set the state_group to a new object as object() != object()
-            state_group = object()
+    async def _get_approximate_current_memberships_in_room(
+        self, room_id: str
+    ) -> Mapping[str, Optional[str]]:
+        """Build a map from event id to membership, for all events in the current state.
 
-        assert state_group is not None
-        with Measure(self._clock, "get_joined_hosts"):
-            return await self._get_joined_hosts(
-                room_id, state_group, state, state_entry=state_entry
-            )
+        The event ids of non-memberships events (e.g. `m.room.power_levels`) are present
+        in the result, mapped to values of `None`.
 
-    @cached(num_args=2, max_entries=10000, iterable=True)
-    async def _get_joined_hosts(
-        self,
-        room_id: str,
-        state_group: Union[object, int],
-        state: StateMap[str],
-        state_entry: "_StateCacheEntry",
-    ) -> FrozenSet[str]:
-        # We don't use `state_group`, it's there so that we can cache based on
-        # it. However, its important that its never None, since two
-        # current_state's with a state_group of None are likely to be different.
-        #
-        # The `state_group` must match the `state_entry.state_group` (if not None).
-        assert state_group is not None
-        assert state_entry.state_group is None or state_entry.state_group == state_group
+        The result is approximate for partially-joined rooms. It is fully accurate
+        for fully-joined rooms.
+        """
 
-        # We use a secondary cache of previous work to allow us to build up the
-        # joined hosts for the given state group based on previous state groups.
-        #
-        # We cache one object per room containing the results of the last state
-        # group we got joined hosts for. The idea is that generally
-        # `get_joined_hosts` is called with the "current" state group for the
-        # room, and so consecutive calls will be for consecutive state groups
-        # which point to the previous state group.
-        cache = await self._get_joined_hosts_cache(room_id)  # type: ignore[misc]
+        rows = cast(
+            List[Tuple[str, Optional[str]]],
+            await self.db_pool.simple_select_list(
+                "current_state_events",
+                keyvalues={"room_id": room_id},
+                retcols=("event_id", "membership"),
+                desc="has_completed_background_updates",
+            ),
+        )
+        return dict(rows)
 
-        # If the state group in the cache matches, we already have the data we need.
-        if state_entry.state_group == cache.state_group:
-            return frozenset(cache.hosts_to_joined_users)
-
-        # Since we'll mutate the cache we need to lock.
-        async with self._joined_host_linearizer.queue(room_id):
-            if state_entry.state_group == cache.state_group:
-                # Same state group, so nothing to do. We've already checked for
-                # this above, but the cache may have changed while waiting on
-                # the lock.
-                pass
-            elif state_entry.prev_group == cache.state_group:
-                # The cached work is for the previous state group, so we work out
-                # the delta.
-                assert state_entry.delta_ids is not None
-                for (typ, state_key), event_id in state_entry.delta_ids.items():
-                    if typ != EventTypes.Member:
-                        continue
-
-                    host = intern_string(get_domain_from_id(state_key))
-                    user_id = state_key
-                    known_joins = cache.hosts_to_joined_users.setdefault(host, set())
-
-                    event = await self.get_event(event_id)
-                    if event.membership == Membership.JOIN:
-                        known_joins.add(user_id)
-                    else:
-                        known_joins.discard(user_id)
-
-                        if not known_joins:
-                            cache.hosts_to_joined_users.pop(host, None)
-            else:
-                # The cache doesn't match the state group or prev state group,
-                # so we calculate the result from first principles.
-                joined_user_ids = await self.get_joined_user_ids_from_state(
-                    room_id, state
-                )
-
-                cache.hosts_to_joined_users = {}
-                for user_id in joined_user_ids:
-                    host = intern_string(get_domain_from_id(user_id))
-                    cache.hosts_to_joined_users.setdefault(host, set()).add(user_id)
-
-            if state_entry.state_group:
-                cache.state_group = state_entry.state_group
-            else:
-                cache.state_group = object()
-
-        return frozenset(cache.hosts_to_joined_users)
-
-    @cached(max_entries=10000)
+    # TODO This returns a mutable object, which is generally confusing when using a cache.
+    @cached(max_entries=10000)  # type: ignore[synapse-@cached-mutable]
     def _get_joined_hosts_cache(self, room_id: str) -> "_JoinedHostsCache":
         return _JoinedHostsCache()
 
@@ -1169,7 +1154,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
         return count == 0
 
     @cached()
-    async def get_forgotten_rooms_for_user(self, user_id: str) -> Set[str]:
+    async def get_forgotten_rooms_for_user(self, user_id: str) -> AbstractSet[str]:
         """Gets all rooms the user has forgotten.
 
         Args:
@@ -1224,7 +1209,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
                 AND forgotten = 0;
         """
 
-        rows = await self.db_pool.execute("is_forgotten_room", None, sql, room_id)
+        rows = await self.db_pool.execute("is_forgotten_room", sql, room_id)
 
         # `count(*)` returns always an integer
         # If any rows still exist it means someone has not forgotten this room yet
@@ -1249,6 +1234,28 @@ class RoomMemberWorkerStore(EventsWorkerStore):
 
         return set(room_ids)
 
+    async def get_membership_event_ids_for_user(
+        self, user_id: str, room_id: str
+    ) -> Set[str]:
+        """Get all event_ids for the given user and room.
+
+        Args:
+            user_id: The user ID to get the event IDs for.
+            room_id: The room ID to look up events for.
+
+        Returns:
+            Set of event IDs
+        """
+
+        event_ids = await self.db_pool.simple_select_onecol(
+            table="room_memberships",
+            keyvalues={"user_id": user_id, "room_id": room_id},
+            retcol="event_id",
+            desc="get_membership_event_ids_for_user",
+        )
+
+        return set(event_ids)
+
     @cached(max_entries=5000)
     async def _get_membership_from_event_id(
         self, member_event_id: str
@@ -1260,7 +1267,7 @@ class RoomMemberWorkerStore(EventsWorkerStore):
     )
     async def get_membership_from_event_ids(
         self, member_event_ids: Iterable[str]
-    ) -> Dict[str, Optional[EventIdMembership]]:
+    ) -> Mapping[str, Optional[EventIdMembership]]:
         """Get user_id and membership of a set of event IDs.
 
         Returns:
@@ -1268,21 +1275,22 @@ class RoomMemberWorkerStore(EventsWorkerStore):
             membership event, otherwise the value is None.
         """
 
-        rows = await self.db_pool.simple_select_many_batch(
-            table="room_memberships",
-            column="event_id",
-            iterable=member_event_ids,
-            retcols=("user_id", "membership", "event_id"),
-            keyvalues={},
-            batch_size=500,
-            desc="get_membership_from_event_ids",
+        rows = cast(
+            List[Tuple[str, str, str]],
+            await self.db_pool.simple_select_many_batch(
+                table="room_memberships",
+                column="event_id",
+                iterable=member_event_ids,
+                retcols=("user_id", "membership", "event_id"),
+                keyvalues={},
+                batch_size=500,
+                desc="get_membership_from_event_ids",
+            ),
         )
 
         return {
-            row["event_id"]: EventIdMembership(
-                membership=row["membership"], user_id=row["user_id"]
-            )
-            for row in rows
+            event_id: EventIdMembership(membership=membership, user_id=user_id)
+            for user_id, membership, event_id in rows
         }
 
     async def is_local_host_in_room_ignoring_users(
@@ -1318,6 +1326,50 @@ class RoomMemberWorkerStore(EventsWorkerStore):
             _is_local_host_in_room_ignoring_users_txn,
         )
 
+    async def forget(self, user_id: str, room_id: str) -> None:
+        """Indicate that user_id wishes to discard history for room_id."""
+
+        def f(txn: LoggingTransaction) -> None:
+            self.db_pool.simple_update_txn(
+                txn,
+                table="room_memberships",
+                keyvalues={"user_id": user_id, "room_id": room_id},
+                updatevalues={"forgotten": 1},
+            )
+
+            self._invalidate_cache_and_stream(txn, self.did_forget, (user_id, room_id))
+            self._invalidate_cache_and_stream(
+                txn, self.get_forgotten_rooms_for_user, (user_id,)
+            )
+
+        await self.db_pool.runInteraction("forget_membership", f)
+
+    async def get_room_forgetter_stream_pos(self) -> int:
+        """Get the stream position of the background process to forget rooms when left
+        by users.
+        """
+        return await self.db_pool.simple_select_one_onecol(
+            table="room_forgetter_stream_pos",
+            keyvalues={},
+            retcol="stream_id",
+            desc="room_forgetter_stream_pos",
+        )
+
+    async def update_room_forgetter_stream_pos(self, stream_id: int) -> None:
+        """Update the stream position of the background process to forget rooms when
+        left by users.
+
+        Must only be used by the worker running the background process.
+        """
+        assert self.hs.config.worker.run_background_tasks
+
+        await self.db_pool.simple_update_one(
+            table="room_forgetter_stream_pos",
+            keyvalues={},
+            updatevalues={"stream_id": stream_id},
+            desc="room_forgetter_stream_pos",
+        )
+
 
 class RoomMemberBackgroundUpdateStore(SQLBaseStore):
     def __init__(
@@ -1341,6 +1393,12 @@ class RoomMemberBackgroundUpdateStore(SQLBaseStore):
             columns=["user_id", "room_id"],
             where_clause="forgotten = 1",
         )
+        self.db_pool.updates.register_background_index_update(
+            "room_membership_user_room_index",
+            index_name="room_membership_user_room_idx",
+            table="room_memberships",
+            columns=["user_id", "room_id"],
+        )
 
     async def _background_add_membership_profile(
         self, progress: JsonDict, batch_size: int
@@ -1357,7 +1415,6 @@ class RoomMemberBackgroundUpdateStore(SQLBaseStore):
                 SELECT stream_ordering, event_id, events.room_id, event_json.json
                 FROM events
                 INNER JOIN event_json USING (event_id)
-                INNER JOIN room_memberships USING (event_id)
                 WHERE ? <= stream_ordering AND stream_ordering < ?
                 AND type = 'm.room.member'
                 ORDER BY stream_ordering DESC
@@ -1366,18 +1423,16 @@ class RoomMemberBackgroundUpdateStore(SQLBaseStore):
 
             txn.execute(sql, (target_min_stream_id, max_stream_id, batch_size))
 
-            rows = self.db_pool.cursor_to_dict(txn)
+            rows = txn.fetchall()
             if not rows:
                 return 0
 
-            min_stream_id = rows[-1]["stream_ordering"]
+            min_stream_id = rows[-1][0]
 
             to_update = []
-            for row in rows:
-                event_id = row["event_id"]
-                room_id = row["room_id"]
+            for _, event_id, room_id, json in rows:
                 try:
-                    event_json = db_to_json(row["json"])
+                    event_json = db_to_json(json)
                     content = event_json["content"]
                 except Exception:
                     continue
@@ -1492,29 +1547,6 @@ class RoomMemberStore(
         hs: "HomeServer",
     ):
         super().__init__(database, db_conn, hs)
-
-    async def forget(self, user_id: str, room_id: str) -> None:
-        """Indicate that user_id wishes to discard history for room_id."""
-
-        def f(txn: LoggingTransaction) -> None:
-            sql = (
-                "UPDATE"
-                "  room_memberships"
-                " SET"
-                "  forgotten = 1"
-                " WHERE"
-                "  user_id = ?"
-                " AND"
-                "  room_id = ?"
-            )
-            txn.execute(sql, (user_id, room_id))
-
-            self._invalidate_cache_and_stream(txn, self.did_forget, (user_id, room_id))
-            self._invalidate_cache_and_stream(
-                txn, self.get_forgotten_rooms_for_user, (user_id,)
-            )
-
-        await self.db_pool.runInteraction("forget_membership", f)
 
 
 def extract_heroes_from_room_summary(

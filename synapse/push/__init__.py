@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """
 This module implements the push rules & notifications portion of the Matrix
@@ -101,9 +108,9 @@ if TYPE_CHECKING:
 class PusherConfig:
     """Parameters necessary to configure a pusher."""
 
-    id: Optional[str]
+    id: Optional[int]
     user_name: str
-    access_token: Optional[int]
+
     profile_tag: str
     kind: str
     app_id: str
@@ -118,6 +125,11 @@ class PusherConfig:
     failing_since: Optional[int]
     enabled: bool
     device_id: Optional[str]
+
+    # XXX(quenting): The access_token is not persisted anymore for new pushers, but we
+    # keep it when reading from the database, so that we don't get stale pushers
+    # while the "set_device_id_for_pushers" background update is running.
+    access_token: Optional[int]
 
     def as_dict(self) -> Dict[str, Any]:
         """Information that can be retrieved about a pusher after creation."""
@@ -177,7 +189,7 @@ class Pusher(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def on_new_receipts(self, min_stream_id: int, max_stream_id: int) -> None:
+    def on_new_receipts(self) -> None:
         raise NotImplementedError()
 
     @abc.abstractmethod

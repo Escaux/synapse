@@ -1,20 +1,28 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Union, cast
 
+import attr
 from typing_extensions import TypedDict
 
 from synapse.metrics.background_process_metrics import wrap_as_background_process
@@ -42,7 +50,8 @@ logger = logging.getLogger(__name__)
 LAST_SEEN_GRANULARITY = 120 * 1000
 
 
-class DeviceLastConnectionInfo(TypedDict):
+@attr.s(slots=True, frozen=True, auto_attribs=True)
+class DeviceLastConnectionInfo:
     """Metadata for the last connection seen for a user and device combination"""
 
     # These types must match the columns in the `devices` table
@@ -463,18 +472,15 @@ class ClientIpWorkerStore(ClientIpBackgroundUpdateStore, MonthlyActiveUsersWorke
         #
         # This works by finding the max last_seen that is less than the given
         # time, but has no more than N rows before it, deleting all rows with
-        # a lesser last_seen time. (We COALESCE so that the sub-SELECT always
-        # returns exactly one row).
+        # a lesser last_seen time. (We use an `IN` clause to force postgres to
+        # use the index, otherwise it tends to do a seq scan).
         sql = """
             DELETE FROM user_ips
-            WHERE last_seen <= (
-                SELECT COALESCE(MAX(last_seen), -1)
-                FROM (
-                    SELECT last_seen FROM user_ips
-                    WHERE last_seen <= ?
-                    ORDER BY last_seen ASC
-                    LIMIT 5000
-                ) AS u
+            WHERE last_seen IN (
+                SELECT last_seen FROM user_ips
+                WHERE last_seen <= ?
+                ORDER BY last_seen ASC
+                LIMIT 5000
             )
         """
 
@@ -499,8 +505,7 @@ class ClientIpWorkerStore(ClientIpBackgroundUpdateStore, MonthlyActiveUsersWorke
             device_id: If None fetches all devices for the user
 
         Returns:
-            A dictionary mapping a tuple of (user_id, device_id) to dicts, with
-            keys giving the column names from the devices table.
+            A dictionary mapping a tuple of (user_id, device_id) to DeviceLastConnectionInfo.
         """
 
         keyvalues = {"user_id": user_id}
@@ -508,7 +513,7 @@ class ClientIpWorkerStore(ClientIpBackgroundUpdateStore, MonthlyActiveUsersWorke
             keyvalues["device_id"] = device_id
 
         res = cast(
-            List[DeviceLastConnectionInfo],
+            List[Tuple[str, Optional[str], Optional[str], str, Optional[int]]],
             await self.db_pool.simple_select_list(
                 table="devices",
                 keyvalues=keyvalues,
@@ -516,7 +521,16 @@ class ClientIpWorkerStore(ClientIpBackgroundUpdateStore, MonthlyActiveUsersWorke
             ),
         )
 
-        return {(d["user_id"], d["device_id"]): d for d in res}
+        return {
+            (user_id, device_id): DeviceLastConnectionInfo(
+                user_id=user_id,
+                device_id=device_id,
+                ip=ip,
+                user_agent=user_agent,
+                last_seen=last_seen,
+            )
+            for user_id, ip, user_agent, device_id, last_seen in res
+        }
 
     async def _get_user_ip_and_agents_from_database(
         self, user: UserID, since_ts: int = 0
@@ -579,6 +593,32 @@ class ClientIpWorkerStore(ClientIpBackgroundUpdateStore, MonthlyActiveUsersWorke
         device_id: Optional[str],
         now: Optional[int] = None,
     ) -> None:
+        """Record that `user_id` used `access_token` from this `ip` address.
+
+        This method does two things.
+
+        1. It queues up a row to be upserted into the `client_ips` table. These happen
+           periodically; see _update_client_ips_batch.
+        2. It immediately records this user as having taken action for the purposes of
+           MAU tracking.
+
+        Any DB writes take place on the background tasks worker, falling back to the
+        main process. If we're not that worker, this method emits a replication payload
+        to run this logic on that worker.
+
+        Two caveats to note:
+
+         - We only take action once per LAST_SEEN_GRANULARITY, to avoid spamming the
+           DB with writes.
+         - Requests using the sliding-sync proxy's user agent are excluded, as its
+           requests are not directly driven by end-users. This is a hack and we're not
+           very proud of it.
+        """
+        # The sync proxy continuously triggers /sync even if the user is not
+        # present so should be excluded from user_ips entries.
+        if user_agent == "sync-v3-proxy-":
+            return
+
         if not now:
             now = int(self._clock.time_msec())
         key = (user_id, access_token, ip)
@@ -678,8 +718,7 @@ class ClientIpWorkerStore(ClientIpBackgroundUpdateStore, MonthlyActiveUsersWorke
             device_id: If None fetches all devices for the user
 
         Returns:
-            A dictionary mapping a tuple of (user_id, device_id) to dicts, with
-            keys giving the column names from the devices table.
+            A dictionary mapping a tuple of (user_id, device_id) to DeviceLastConnectionInfo.
         """
         ret = await self._get_last_client_ip_by_device_from_database(user_id, device_id)
 
@@ -700,13 +739,13 @@ class ClientIpWorkerStore(ClientIpBackgroundUpdateStore, MonthlyActiveUsersWorke
                     continue
 
                 if not device_id or did == device_id:
-                    ret[(user_id, did)] = {
-                        "user_id": user_id,
-                        "ip": ip,
-                        "user_agent": user_agent,
-                        "device_id": did,
-                        "last_seen": last_seen,
-                    }
+                    ret[(user_id, did)] = DeviceLastConnectionInfo(
+                        user_id=user_id,
+                        ip=ip,
+                        user_agent=user_agent,
+                        device_id=did,
+                        last_seen=last_seen,
+                    )
         return ret
 
     async def get_user_ip_and_agents(
@@ -759,3 +798,14 @@ class ClientIpWorkerStore(ClientIpBackgroundUpdateStore, MonthlyActiveUsersWorke
                     }
 
         return list(results.values())
+
+    async def get_last_seen_for_user_id(self, user_id: str) -> Optional[int]:
+        """Get the last seen timestamp for a user, if we have it."""
+
+        return await self.db_pool.simple_select_one_onecol(
+            table="user_ips",
+            keyvalues={"user_id": user_id},
+            retcol="MAX(last_seen)",
+            allow_none=True,
+            desc="get_last_seen_for_user_id",
+        )

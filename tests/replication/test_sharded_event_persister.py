@@ -1,22 +1,33 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from unittest.mock import patch
 
+from twisted.test.proto_helpers import MemoryReactor
+
 from synapse.rest import admin
 from synapse.rest.client import login, room, sync
+from synapse.server import HomeServer
 from synapse.storage.util.id_generators import MultiWriterIdGenerator
+from synapse.util import Clock
 
 from tests.replication._base import BaseMultiWorkerStreamTestCase
 from tests.server import make_request
@@ -34,7 +45,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
         sync.register_servlets,
     ]
 
-    def prepare(self, reactor, clock, hs):
+    def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
         # Register a user who sends a message that we'll get notified about
         self.other_user_id = self.register_user("otheruser", "pass")
         self.other_access_token = self.login("otheruser", "pass")
@@ -42,16 +53,17 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
         self.room_creator = self.hs.get_room_creation_handler()
         self.store = hs.get_datastores().main
 
-    def default_config(self):
+    def default_config(self) -> dict:
         conf = super().default_config()
         conf["stream_writers"] = {"events": ["worker1", "worker2"]}
         conf["instance_map"] = {
+            "main": {"host": "testserv", "port": 8765},
             "worker1": {"host": "testserv", "port": 1001},
             "worker2": {"host": "testserv", "port": 1002},
         }
         return conf
 
-    def _create_room(self, room_id: str, user_id: str, tok: str):
+    def _create_room(self, room_id: str, user_id: str, tok: str) -> None:
         """Create a room with given room_id"""
 
         # We control the room ID generation by patching out the
@@ -62,7 +74,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
             mock.side_effect = lambda: room_id
             self.helper.create_room_as(user_id, tok=tok)
 
-    def test_basic(self):
+    def test_basic(self) -> None:
         """Simple test to ensure that multiple rooms can be created and joined,
         and that different rooms get handled by different instances.
         """
@@ -112,7 +124,7 @@ class EventPersisterShardTestCase(BaseMultiWorkerStreamTestCase):
         self.assertTrue(persisted_on_1)
         self.assertTrue(persisted_on_2)
 
-    def test_vector_clock_token(self):
+    def test_vector_clock_token(self) -> None:
         """Tests that using a stream token with a vector clock component works
         correctly with basic /sync and /messages usage.
         """

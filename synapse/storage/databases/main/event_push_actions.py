@@ -1,17 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015 OpenMarket Ltd
-# Copyright 2018 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """Responsible for storing and fetching push actions / notifications.
 
@@ -100,7 +106,7 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.main.receipts import ReceiptsWorkerStore
 from synapse.storage.databases.main.stream import StreamWorkerStore
-from synapse.types import JsonDict
+from synapse.types import JsonDict, StrCollection
 from synapse.util import json_encoder
 from synapse.util.caches.descriptors import cached
 
@@ -182,6 +188,7 @@ class UserPushAction(EmailPushAction):
     profile_tag: str
 
 
+# TODO This is used as a cached value and is mutable.
 @attr.s(slots=True, auto_attribs=True)
 class NotifCounts:
     """
@@ -193,7 +200,7 @@ class NotifCounts:
     highlight_count: int = 0
 
 
-@attr.s(slots=True, auto_attribs=True)
+@attr.s(slots=True, frozen=True, auto_attribs=True)
 class RoomNotifCounts:
     """
     The per-user, per-room count of notifications. Used by sync and push.
@@ -201,11 +208,18 @@ class RoomNotifCounts:
 
     main_timeline: NotifCounts
     # Map of thread ID to the notification counts.
-    threads: Dict[str, NotifCounts]
+    threads: Mapping[str, NotifCounts]
+
+    @staticmethod
+    def empty() -> "RoomNotifCounts":
+        return _EMPTY_ROOM_NOTIF_COUNTS
 
     def __len__(self) -> int:
         # To properly account for the amount of space in any caches.
         return len(self.threads) + 1
+
+
+_EMPTY_ROOM_NOTIF_COUNTS = RoomNotifCounts(NotifCounts(), {})
 
 
 def _serialize_action(
@@ -282,179 +296,60 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             unique=True,
         )
 
-        self.db_pool.updates.register_background_update_handler(
-            "event_push_backfill_thread_id",
-            self._background_backfill_thread_id,
+        self.db_pool.updates.register_background_validate_constraint(
+            "event_push_actions_staging_thread_id",
+            constraint_name="event_push_actions_staging_thread_id",
+            table="event_push_actions_staging",
         )
-
-        # Indexes which will be used to quickly make the thread_id column non-null.
-        self.db_pool.updates.register_background_index_update(
-            "event_push_actions_thread_id_null",
-            index_name="event_push_actions_thread_id_null",
+        self.db_pool.updates.register_background_validate_constraint(
+            "event_push_actions_thread_id",
+            constraint_name="event_push_actions_thread_id",
             table="event_push_actions",
-            columns=["thread_id"],
-            where_clause="thread_id IS NULL",
         )
-        self.db_pool.updates.register_background_index_update(
-            "event_push_summary_thread_id_null",
-            index_name="event_push_summary_thread_id_null",
+        self.db_pool.updates.register_background_validate_constraint(
+            "event_push_summary_thread_id",
+            constraint_name="event_push_summary_thread_id",
             table="event_push_summary",
-            columns=["thread_id"],
-            where_clause="thread_id IS NULL",
         )
 
-        # Check ASAP (and then later, every 1s) to see if we have finished
-        # background updates the event_push_actions and event_push_summary tables.
-        self._clock.call_later(0.0, self._check_event_push_backfill_thread_id)
-        self._event_push_backfill_thread_id_done = False
-
-    @wrap_as_background_process("check_event_push_backfill_thread_id")
-    async def _check_event_push_backfill_thread_id(self) -> None:
-        """
-        Has thread_id finished backfilling?
-
-        If not, we need to just-in-time update it so the queries work.
-        """
-        done = await self.db_pool.updates.has_completed_background_update(
-            "event_push_backfill_thread_id"
+        self.db_pool.updates.register_background_update_handler(
+            "event_push_drop_null_thread_id_indexes",
+            self._background_drop_null_thread_id_indexes,
         )
 
-        if done:
-            self._event_push_backfill_thread_id_done = True
-        else:
-            # Reschedule to run.
-            self._clock.call_later(15.0, self._check_event_push_backfill_thread_id)
+        # Add a room ID index to speed up room deletion
+        self.db_pool.updates.register_background_index_update(
+            "event_push_summary_index_room_id",
+            index_name="event_push_summary_index_room_id",
+            table="event_push_summary",
+            columns=["room_id"],
+        )
 
-    async def _background_backfill_thread_id(
+    async def _background_drop_null_thread_id_indexes(
         self, progress: JsonDict, batch_size: int
     ) -> int:
         """
-        Fill in the thread_id field for event_push_actions and event_push_summary.
-
-        This is preparatory so that it can be made non-nullable in the future.
-
-        Because all current (null) data is done in an unthreaded manner this
-        simply assumes it is on the "main" timeline. Since event_push_actions
-        are periodically cleared it is not possible to correctly re-calculate
-        the thread_id.
+        Drop the indexes used to find null thread_ids for event_push_actions and
+        event_push_summary.
         """
-        event_push_actions_done = progress.get("event_push_actions_done", False)
 
-        def add_thread_id_txn(
-            txn: LoggingTransaction, start_stream_ordering: int
-        ) -> int:
-            sql = """
-            SELECT stream_ordering
-            FROM event_push_actions
-            WHERE
-                thread_id IS NULL
-                AND stream_ordering > ?
-            ORDER BY stream_ordering
-            LIMIT ?
-            """
-            txn.execute(sql, (start_stream_ordering, batch_size))
+        def drop_null_thread_id_indexes_txn(txn: LoggingTransaction) -> None:
+            sql = "DROP INDEX IF EXISTS event_push_actions_thread_id_null"
+            logger.debug("[SQL] %s", sql)
+            txn.execute(sql)
 
-            # No more rows to process.
-            rows = txn.fetchall()
-            if not rows:
-                progress["event_push_actions_done"] = True
-                self.db_pool.updates._background_update_progress_txn(
-                    txn, "event_push_backfill_thread_id", progress
-                )
-                return 0
+            sql = "DROP INDEX IF EXISTS event_push_summary_thread_id_null"
+            logger.debug("[SQL] %s", sql)
+            txn.execute(sql)
 
-            # Update the thread ID for any of those rows.
-            max_stream_ordering = rows[-1][0]
-
-            sql = """
-            UPDATE event_push_actions
-            SET thread_id = 'main'
-            WHERE ? < stream_ordering AND stream_ordering <= ? AND thread_id IS NULL
-            """
-            txn.execute(
-                sql,
-                (
-                    start_stream_ordering,
-                    max_stream_ordering,
-                ),
-            )
-
-            # Update progress.
-            processed_rows = txn.rowcount
-            progress["max_event_push_actions_stream_ordering"] = max_stream_ordering
-            self.db_pool.updates._background_update_progress_txn(
-                txn, "event_push_backfill_thread_id", progress
-            )
-
-            return processed_rows
-
-        def add_thread_id_summary_txn(txn: LoggingTransaction) -> int:
-            min_user_id = progress.get("max_summary_user_id", "")
-            min_room_id = progress.get("max_summary_room_id", "")
-
-            # Slightly overcomplicated query for getting the Nth user ID / room
-            # ID tuple, or the last if there are less than N remaining.
-            sql = """
-            SELECT user_id, room_id FROM (
-                SELECT user_id, room_id FROM event_push_summary
-                WHERE (user_id, room_id) > (?, ?)
-                    AND thread_id IS NULL
-                ORDER BY user_id, room_id
-                LIMIT ?
-            ) AS e
-            ORDER BY user_id DESC, room_id DESC
-            LIMIT 1
-            """
-
-            txn.execute(sql, (min_user_id, min_room_id, batch_size))
-            row = txn.fetchone()
-            if not row:
-                return 0
-
-            max_user_id, max_room_id = row
-
-            sql = """
-            UPDATE event_push_summary
-            SET thread_id = 'main'
-            WHERE
-                (?, ?) < (user_id, room_id) AND (user_id, room_id) <= (?, ?)
-                AND thread_id IS NULL
-            """
-            txn.execute(sql, (min_user_id, min_room_id, max_user_id, max_room_id))
-            processed_rows = txn.rowcount
-
-            progress["max_summary_user_id"] = max_user_id
-            progress["max_summary_room_id"] = max_room_id
-            self.db_pool.updates._background_update_progress_txn(
-                txn, "event_push_backfill_thread_id", progress
-            )
-
-            return processed_rows
-
-        # First update the event_push_actions table, then the event_push_summary table.
-        #
-        # Note that the event_push_actions_staging table is ignored since it is
-        # assumed that items in that table will only exist for a short period of
-        # time.
-        if not event_push_actions_done:
-            result = await self.db_pool.runInteraction(
-                "event_push_backfill_thread_id",
-                add_thread_id_txn,
-                progress.get("max_event_push_actions_stream_ordering", 0),
-            )
-        else:
-            result = await self.db_pool.runInteraction(
-                "event_push_backfill_thread_id",
-                add_thread_id_summary_txn,
-            )
-
-            # Only done after the event_push_summary table is done.
-            if not result:
-                await self.db_pool.updates._end_background_update(
-                    "event_push_backfill_thread_id"
-                )
-
-        return result
+        await self.db_pool.runInteraction(
+            "drop_null_thread_id_indexes_txn",
+            drop_null_thread_id_indexes_txn,
+        )
+        await self.db_pool.updates._end_background_update(
+            "event_push_drop_null_thread_id_indexes"
+        )
+        return 0
 
     async def get_unread_counts_by_room_for_user(self, user_id: str) -> Dict[str, int]:
         """Get the notification count by room for a user. Only considers notifications,
@@ -490,7 +385,6 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             WITH all_receipts AS (
                 SELECT room_id, thread_id, MAX(event_stream_ordering) AS max_receipt_stream_ordering
                 FROM receipts_linearized
-                LEFT JOIN events USING (room_id, event_id)
                 WHERE
                     {receipt_types_clause}
                     AND user_id = ?
@@ -603,7 +497,7 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
 
         return room_to_count
 
-    @cached(tree=True, max_entries=5000, iterable=True)
+    @cached(tree=True, max_entries=5000, iterable=True)  # type: ignore[synapse-@cached-mutable]
     async def get_unread_event_push_actions_by_room_for_user(
         self,
         room_id: str,
@@ -704,25 +598,6 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             (ReceiptTypes.READ, ReceiptTypes.READ_PRIVATE),
         )
 
-        # First ensure that the existing rows have an updated thread_id field.
-        if not self._event_push_backfill_thread_id_done:
-            txn.execute(
-                """
-                UPDATE event_push_summary
-                SET thread_id = ?
-                WHERE room_id = ? AND user_id = ? AND thread_id is NULL
-                """,
-                (MAIN_TIMELINE, room_id, user_id),
-            )
-            txn.execute(
-                """
-                UPDATE event_push_actions
-                SET thread_id = ?
-                WHERE room_id = ? AND user_id = ? AND thread_id is NULL
-                """,
-                (MAIN_TIMELINE, room_id, user_id),
-            )
-
         # First we pull the counts from the summary table.
         #
         # We check that `last_receipt_stream_ordering` matches the stream ordering of the
@@ -745,13 +620,12 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
                 SELECT notif_count, COALESCE(unread_count, 0), thread_id
                 FROM event_push_summary
                 LEFT JOIN (
-                    SELECT thread_id, MAX(stream_ordering) AS threaded_receipt_stream_ordering
+                    SELECT thread_id, MAX(event_stream_ordering) AS threaded_receipt_stream_ordering
                     FROM receipts_linearized
-                    LEFT JOIN events USING (room_id, event_id)
                     WHERE
                         user_id = ?
                         AND room_id = ?
-                        AND stream_ordering > ?
+                        AND event_stream_ordering > ?
                         AND {receipt_types_clause}
                     GROUP BY thread_id
                 ) AS receipts USING (thread_id)
@@ -783,13 +657,12 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
         sql = f"""
             SELECT COUNT(*), thread_id FROM event_push_actions
             LEFT JOIN (
-                SELECT thread_id, MAX(stream_ordering) AS threaded_receipt_stream_ordering
+                SELECT thread_id, MAX(event_stream_ordering) AS threaded_receipt_stream_ordering
                 FROM receipts_linearized
-                LEFT JOIN events USING (room_id, event_id)
                 WHERE
                     user_id = ?
                     AND room_id = ?
-                    AND stream_ordering > ?
+                    AND event_stream_ordering > ?
                     AND {receipt_types_clause}
                 GROUP BY thread_id
             ) AS receipts USING (thread_id)
@@ -862,13 +735,12 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
                 thread_id
             FROM event_push_actions
             LEFT JOIN (
-                SELECT thread_id, MAX(stream_ordering) AS threaded_receipt_stream_ordering
+                SELECT thread_id, MAX(event_stream_ordering) AS threaded_receipt_stream_ordering
                 FROM receipts_linearized
-                LEFT JOIN events USING (room_id, event_id)
                 WHERE
                     user_id = ?
                     AND room_id = ?
-                    AND stream_ordering > ?
+                    AND event_stream_ordering > ?
                     AND {receipt_types_clause}
                 GROUP BY thread_id
             ) AS receipts USING (thread_id)
@@ -983,37 +855,85 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
 
         return await self.db_pool.runInteraction("get_push_action_users_in_range", f)
 
-    def _get_receipts_by_room_txn(
-        self, txn: LoggingTransaction, user_id: str
+    def _get_receipts_for_room_and_threads_txn(
+        self,
+        txn: LoggingTransaction,
+        user_id: str,
+        room_ids: StrCollection,
+        thread_ids: StrCollection,
     ) -> Dict[str, _RoomReceipt]:
         """
-        Generate a map of room ID to the latest stream ordering that has been
-        read by the given user.
+        Get (private) read receipts for a user in each of the given room IDs
+        and thread IDs.
 
-        Args:
-            txn:
-            user_id: The user to fetch receipts for.
+        Note: The corresponding room ID for each thread must appear in
+        `room_ids` arg.
 
         Returns:
             A map including all rooms the user is in with a receipt. It maps
             room IDs to _RoomReceipt instances
         """
-        receipt_types_clause, args = make_in_list_sql_clause(
+
+        receipt_types_clause, receipts_args = make_in_list_sql_clause(
             self.database_engine,
             "receipt_type",
             (ReceiptTypes.READ, ReceiptTypes.READ_PRIVATE),
         )
 
+        thread_ids_clause, thread_ids_args = make_in_list_sql_clause(
+            self.database_engine,
+            "thread_id",
+            thread_ids,
+        )
+
+        room_ids_clause, room_ids_args = make_in_list_sql_clause(
+            self.database_engine,
+            "room_id",
+            room_ids,
+        )
+
+        # We use the union of two (almost identical) queries here, the first to
+        # fetch the specific thread receipts and the second to fetch the
+        # unthreaded receipts.
+        #
+        # This SQL is optimized to use the indices we have on
+        # `receipts_linearized`.
+        #
+        # We compare room ID and thread IDs independently due to the above,
+        # which means that this query might return more rows than we need if the
+        # same thread ID appears across different rooms (e.g. 'main' thread ID).
+        # This doesn't cause any logic issues, and isn't a performance concern
+        # given this function generally gets called with only one room and
+        # thread ID.
         sql = f"""
+            SELECT room_id, thread_id, MAX(event_stream_ordering)
+            FROM receipts_linearized
+            WHERE {receipt_types_clause}
+                AND {thread_ids_clause}
+                AND {room_ids_clause}
+            AND user_id = ?
+            GROUP BY room_id, thread_id
+
+        UNION ALL
+
             SELECT room_id, thread_id, MAX(stream_ordering)
             FROM receipts_linearized
             INNER JOIN events USING (room_id, event_id)
             WHERE {receipt_types_clause}
+                AND {room_ids_clause}
+                AND thread_id IS NULL
             AND user_id = ?
             GROUP BY room_id, thread_id
         """
 
-        args.extend((user_id,))
+        args = list(receipts_args)
+        args.extend(thread_ids_args)
+        args.extend(room_ids_args)
+        args.append(user_id)
+        args.extend(receipts_args)
+        args.extend(room_ids_args)
+        args.append(user_id)
+
         txn.execute(sql, args)
 
         result: Dict[str, _RoomReceipt] = {}
@@ -1049,12 +969,6 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             The list will have between 0~limit entries.
         """
 
-        receipts_by_room = await self.db_pool.runInteraction(
-            "get_unread_push_actions_for_user_in_range_http_receipts",
-            self._get_receipts_by_room_txn,
-            user_id=user_id,
-        )
-
         def get_push_actions_txn(
             txn: LoggingTransaction,
         ) -> List[Tuple[str, str, str, int, str, bool]]:
@@ -1074,6 +988,27 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
 
         push_actions = await self.db_pool.runInteraction(
             "get_unread_push_actions_for_user_in_range_http", get_push_actions_txn
+        )
+
+        room_ids = set()
+        thread_ids = []
+        for (
+            _,
+            room_id,
+            thread_id,
+            _,
+            _,
+            _,
+        ) in push_actions:
+            room_ids.add(room_id)
+            thread_ids.append(thread_id)
+
+        receipts_by_room = await self.db_pool.runInteraction(
+            "get_unread_push_actions_for_user_in_range_http_receipts",
+            self._get_receipts_for_room_and_threads_txn,
+            user_id=user_id,
+            room_ids=room_ids,
+            thread_ids=thread_ids,
         )
 
         notifs = [
@@ -1122,12 +1057,6 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             The list will have between 0~limit entries.
         """
 
-        receipts_by_room = await self.db_pool.runInteraction(
-            "get_unread_push_actions_for_user_in_range_email_receipts",
-            self._get_receipts_by_room_txn,
-            user_id=user_id,
-        )
-
         def get_push_actions_txn(
             txn: LoggingTransaction,
         ) -> List[Tuple[str, str, str, int, str, bool, int]]:
@@ -1148,6 +1077,28 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
 
         push_actions = await self.db_pool.runInteraction(
             "get_unread_push_actions_for_user_in_range_email", get_push_actions_txn
+        )
+
+        room_ids = set()
+        thread_ids = []
+        for (
+            _,
+            room_id,
+            thread_id,
+            _,
+            _,
+            _,
+            _,
+        ) in push_actions:
+            room_ids.add(room_id)
+            thread_ids.append(thread_id)
+
+        receipts_by_room = await self.db_pool.runInteraction(
+            "get_unread_push_actions_for_user_in_range_email_receipts",
+            self._get_receipts_for_room_and_threads_txn,
+            user_id=user_id,
+            room_ids=room_ids,
+            thread_ids=thread_ids,
         )
 
         # Make a list of dicts from the two sets of results.
@@ -1486,9 +1437,8 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
         )
 
         sql = """
-            SELECT r.stream_id, r.room_id, r.user_id, r.thread_id, e.stream_ordering
+            SELECT r.stream_id, r.room_id, r.user_id, r.thread_id, r.event_stream_ordering
             FROM receipts_linearized AS r
-            INNER JOIN events AS e USING (event_id)
             WHERE ? < r.stream_id AND r.stream_id <= ? AND user_id LIKE ?
             ORDER BY r.stream_id ASC
             LIMIT ?
@@ -1537,25 +1487,6 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
                 """,
                 (room_id, user_id, stream_ordering, *thread_args),
             )
-
-            # First ensure that the existing rows have an updated thread_id field.
-            if not self._event_push_backfill_thread_id_done:
-                txn.execute(
-                    """
-                    UPDATE event_push_summary
-                    SET thread_id = ?
-                    WHERE room_id = ? AND user_id = ? AND thread_id is NULL
-                    """,
-                    (MAIN_TIMELINE, room_id, user_id),
-                )
-                txn.execute(
-                    """
-                    UPDATE event_push_actions
-                    SET thread_id = ?
-                    WHERE room_id = ? AND user_id = ? AND thread_id is NULL
-                    """,
-                    (MAIN_TIMELINE, room_id, user_id),
-                )
 
             # Fetch the notification counts between the stream ordering of the
             # latest receipt and what was previously summarised.
@@ -1691,19 +1622,6 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             rotate_to_stream_ordering: The new maximum event stream ordering to summarise.
         """
 
-        # Ensure that any new actions have an updated thread_id.
-        if not self._event_push_backfill_thread_id_done:
-            txn.execute(
-                """
-                UPDATE event_push_actions
-                SET thread_id = ?
-                WHERE ? < stream_ordering AND stream_ordering <= ? AND thread_id IS NULL
-                """,
-                (MAIN_TIMELINE, old_rotate_stream_ordering, rotate_to_stream_ordering),
-            )
-
-        # XXX Do we need to update summaries here too?
-
         # Calculate the new counts that should be upserted into event_push_summary
         sql = """
             SELECT user_id, room_id, thread_id,
@@ -1766,28 +1684,11 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
 
         logger.info("Rotating notifications, handling %d rows", len(summaries))
 
-        # Ensure that any updated threads have the proper thread_id.
-        if not self._event_push_backfill_thread_id_done:
-            txn.execute_batch(
-                """
-                UPDATE event_push_summary
-                SET thread_id = ?
-                WHERE room_id = ? AND user_id = ? AND thread_id is NULL
-                """,
-                [
-                    (MAIN_TIMELINE, room_id, user_id)
-                    for user_id, room_id, _ in summaries
-                ],
-            )
-
         self.db_pool.simple_upsert_many_txn(
             txn,
             table="event_push_summary",
             key_names=("user_id", "room_id", "thread_id"),
-            key_values=[
-                (user_id, room_id, thread_id)
-                for user_id, room_id, thread_id in summaries
-            ],
+            key_values=list(summaries),
             value_names=("notif_count", "unread_count", "stream_ordering"),
             value_values=[
                 (
@@ -1828,6 +1729,15 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             # We don't want to clear out too much at a time, so we bound our
             # deletes.
             batch_size = self._rotate_count
+
+            if isinstance(self.database_engine, PostgresEngine):
+                # Temporarily disable sequential scans in this transaction. We
+                # need to do this as the postgres statistics don't take into
+                # account the `highlight = 0` part when estimating the
+                # distribution of `stream_ordering`. I.e. since we keep old
+                # highlight rows the query planner thinks there are way more old
+                # rows to delete than there actually are.
+                txn.execute("SET LOCAL enable_seqscan=off")
 
             txn.execute(
                 """
@@ -1916,42 +1826,6 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
             # We sleep to ensure that we don't overwhelm the DB.
             await self._clock.sleep(1.0)
 
-
-class EventPushActionsStore(EventPushActionsWorkerStore):
-    EPA_HIGHLIGHT_INDEX = "epa_highlight_index"
-
-    def __init__(
-        self,
-        database: DatabasePool,
-        db_conn: LoggingDatabaseConnection,
-        hs: "HomeServer",
-    ):
-        super().__init__(database, db_conn, hs)
-
-        self.db_pool.updates.register_background_index_update(
-            self.EPA_HIGHLIGHT_INDEX,
-            index_name="event_push_actions_u_highlight",
-            table="event_push_actions",
-            columns=["user_id", "stream_ordering"],
-        )
-
-        self.db_pool.updates.register_background_index_update(
-            "event_push_actions_highlights_index",
-            index_name="event_push_actions_highlights_index",
-            table="event_push_actions",
-            columns=["user_id", "room_id", "topological_ordering", "stream_ordering"],
-            where_clause="highlight=1",
-        )
-
-        # Add index to make deleting old push actions faster.
-        self.db_pool.updates.register_background_index_update(
-            "event_push_actions_stream_highlight_index",
-            index_name="event_push_actions_stream_highlight_index",
-            table="event_push_actions",
-            columns=["highlight", "stream_ordering"],
-            where_clause="highlight=0",
-        )
-
     async def get_push_actions_for_user(
         self,
         user_id: str,
@@ -2008,6 +1882,42 @@ class EventPushActionsStore(EventPushActionsWorkerStore):
             )
             for row in push_actions
         ]
+
+
+class EventPushActionsStore(EventPushActionsWorkerStore):
+    EPA_HIGHLIGHT_INDEX = "epa_highlight_index"
+
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
+        super().__init__(database, db_conn, hs)
+
+        self.db_pool.updates.register_background_index_update(
+            self.EPA_HIGHLIGHT_INDEX,
+            index_name="event_push_actions_u_highlight",
+            table="event_push_actions",
+            columns=["user_id", "stream_ordering"],
+        )
+
+        self.db_pool.updates.register_background_index_update(
+            "event_push_actions_highlights_index",
+            index_name="event_push_actions_highlights_index",
+            table="event_push_actions",
+            columns=["user_id", "room_id", "topological_ordering", "stream_ordering"],
+            where_clause="highlight=1",
+        )
+
+        # Add index to make deleting old push actions faster.
+        self.db_pool.updates.register_background_index_update(
+            "event_push_actions_stream_highlight_index",
+            index_name="event_push_actions_stream_highlight_index",
+            table="event_push_actions",
+            columns=["highlight", "stream_ordering"],
+            where_clause="highlight=0",
+        )
 
 
 def _action_has_highlight(actions: Collection[Union[Mapping, str]]) -> bool:

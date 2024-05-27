@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """ Tests REST events for /events paths."""
 
@@ -38,7 +45,6 @@ class EventStreamPermissionsTestCase(unittest.HomeserverTestCase):
     ]
 
     def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
-
         config = self.default_config()
         config["enable_registration_captcha"] = False
         config["enable_registration"] = True
@@ -46,12 +52,11 @@ class EventStreamPermissionsTestCase(unittest.HomeserverTestCase):
 
         hs = self.setup_test_homeserver(config=config)
 
-        hs.get_federation_handler = Mock()  # type: ignore[assignment]
+        hs.get_federation_handler = Mock()  # type: ignore[method-assign]
 
         return hs
 
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
-
         # register an account
         self.user_id = self.register_user("sid1", "pass")
         self.token = self.login(self.user_id, "pass")
@@ -66,7 +71,7 @@ class EventStreamPermissionsTestCase(unittest.HomeserverTestCase):
         # 403. However, since the v1 spec no longer exists and the v1
         # implementation is now part of the r0 implementation, the newer
         # behaviour is used instead to be consistent with the r0 spec.
-        # see issue #2602
+        # see issue https://github.com/matrix-org/synapse/issues/2602
         channel = self.make_request(
             "GET", "/events?access_token=%s" % ("invalid" + self.token,)
         )
@@ -142,7 +147,6 @@ class GetEventsTestCase(unittest.HomeserverTestCase):
     ]
 
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
-
         # register an account
         self.user_id = self.register_user("sid1", "pass")
         self.token = self.login(self.user_id, "pass")

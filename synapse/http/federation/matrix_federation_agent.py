@@ -1,16 +1,22 @@
-# Copyright 2019 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 import urllib.parse
 from typing import Any, Generator, List, Optional
@@ -36,7 +42,7 @@ from twisted.web.iweb import IAgent, IAgentEndpointFactory, IBodyProducer, IResp
 
 from synapse.crypto.context_factory import FederationPolicyForHTTPS
 from synapse.http import proxyagent
-from synapse.http.client import BlacklistingAgentWrapper, BlacklistingReactorWrapper
+from synapse.http.client import BlocklistingAgentWrapper, BlocklistingReactorWrapper
 from synapse.http.connectproxyclient import HTTPConnectProxyEndpoint
 from synapse.http.federation.srv_resolver import Server, SrvResolver
 from synapse.http.federation.well_known_resolver import WellKnownResolver
@@ -51,8 +57,10 @@ logger = logging.getLogger(__name__)
 @implementer(IAgent)
 class MatrixFederationAgent:
     """An Agent-like thing which provides a `request` method which correctly
-    handles resolving matrix server names when using matrix://. Handles standard
-    https URIs as normal.
+    handles resolving matrix server names when using `matrix-federation://`. Handles
+    standard https URIs as normal. The `matrix-federation://` scheme is internal to
+    Synapse and we purposely want to avoid colliding with the `matrix://` URL scheme
+    which is now specced.
 
     Doesn't implement any retries. (Those are done in MatrixFederationHttpClient.)
 
@@ -65,12 +73,12 @@ class MatrixFederationAgent:
         user_agent:
             The user agent header to use for federation requests.
 
-        ip_whitelist: Allowed IP addresses.
+        ip_allowlist: Allowed IP addresses.
 
-        ip_blacklist: Disallowed IP addresses.
+        ip_blocklist: Disallowed IP addresses.
 
         proxy_reactor: twisted reactor to use for connections to the proxy server
-           reactor might have some blacklisting applied (i.e. for DNS queries),
+           reactor might have some blocking applied (i.e. for DNS queries),
            but we need unblocked access to the proxy.
 
         _srv_resolver:
@@ -87,17 +95,17 @@ class MatrixFederationAgent:
         reactor: ISynapseReactor,
         tls_client_options_factory: Optional[FederationPolicyForHTTPS],
         user_agent: bytes,
-        ip_whitelist: IPSet,
-        ip_blacklist: IPSet,
+        ip_allowlist: Optional[IPSet],
+        ip_blocklist: IPSet,
         _srv_resolver: Optional[SrvResolver] = None,
         _well_known_resolver: Optional[WellKnownResolver] = None,
     ):
-        # proxy_reactor is not blacklisted
+        # proxy_reactor is not blocklisting reactor
         proxy_reactor = reactor
 
-        # We need to use a DNS resolver which filters out blacklisted IP
+        # We need to use a DNS resolver which filters out blocked IP
         # addresses, to prevent DNS rebinding.
-        reactor = BlacklistingReactorWrapper(reactor, ip_whitelist, ip_blacklist)
+        reactor = BlocklistingReactorWrapper(reactor, ip_allowlist, ip_blocklist)
 
         self._clock = Clock(reactor)
         self._pool = HTTPConnectionPool(reactor)
@@ -120,7 +128,7 @@ class MatrixFederationAgent:
         if _well_known_resolver is None:
             _well_known_resolver = WellKnownResolver(
                 reactor,
-                agent=BlacklistingAgentWrapper(
+                agent=BlocklistingAgentWrapper(
                     ProxyAgent(
                         reactor,
                         proxy_reactor,
@@ -128,7 +136,7 @@ class MatrixFederationAgent:
                         contextFactory=tls_client_options_factory,
                         use_proxy=True,
                     ),
-                    ip_blacklist=ip_blacklist,
+                    ip_blocklist=ip_blocklist,
                 ),
                 user_agent=self.user_agent,
             )
@@ -167,14 +175,14 @@ class MatrixFederationAgent:
         # There must be a valid hostname.
         assert parsed_uri.hostname
 
-        # If this is a matrix:// URI check if the server has delegated matrix
+        # If this is a matrix-federation:// URI check if the server has delegated matrix
         # traffic using well-known delegation.
         #
         # We have to do this here and not in the endpoint as we need to rewrite
         # the host header with the delegated server name.
         delegated_server = None
         if (
-            parsed_uri.scheme == b"matrix"
+            parsed_uri.scheme == b"matrix-federation"
             and not _is_ip_literal(parsed_uri.hostname)
             and not parsed_uri.port
         ):
@@ -250,13 +258,13 @@ class MatrixHostnameEndpointFactory:
 
 @implementer(IStreamClientEndpoint)
 class MatrixHostnameEndpoint:
-    """An endpoint that resolves matrix:// URLs using Matrix server name
+    """An endpoint that resolves matrix-federation:// URLs using Matrix server name
     resolution (i.e. via SRV). Does not check for well-known delegation.
 
     Args:
         reactor: twisted reactor to use for underlying requests
         proxy_reactor: twisted reactor to use for connections to the proxy server.
-           'reactor' might have some blacklisting applied (i.e. for DNS queries),
+           'reactor' might have some blocking applied (i.e. for DNS queries),
            but we need unblocked access to the proxy.
         tls_client_options_factory:
             factory to use for fetching client tls options, or none to disable TLS.
@@ -379,7 +387,7 @@ class MatrixHostnameEndpoint:
         connect to.
         """
 
-        if self._parsed_uri.scheme != b"matrix":
+        if self._parsed_uri.scheme != b"matrix-federation":
             return [Server(host=self._parsed_uri.host, port=self._parsed_uri.port)]
 
         # Note: We don't do well-known lookup as that needs to have happened
@@ -397,15 +405,34 @@ class MatrixHostnameEndpoint:
         if port or _is_ip_literal(host):
             return [Server(host, port or 8448)]
 
+        # Check _matrix-fed._tcp SRV record.
         logger.debug("Looking up SRV record for %s", host.decode(errors="replace"))
+        server_list = await self._srv_resolver.resolve_service(
+            b"_matrix-fed._tcp." + host
+        )
+
+        if server_list:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Got %s from SRV lookup for %s",
+                    ", ".join(map(str, server_list)),
+                    host.decode(errors="replace"),
+                )
+            return server_list
+
+        # No _matrix-fed._tcp SRV record, fallback to legacy _matrix._tcp SRV record.
+        logger.debug(
+            "Looking up deprecated SRV record for %s", host.decode(errors="replace")
+        )
         server_list = await self._srv_resolver.resolve_service(b"_matrix._tcp." + host)
 
         if server_list:
-            logger.debug(
-                "Got %s from SRV lookup for %s",
-                ", ".join(map(str, server_list)),
-                host.decode(errors="replace"),
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Got %s from deprecated SRV lookup for %s",
+                    ", ".join(map(str, server_list)),
+                    host.decode(errors="replace"),
+                )
             return server_list
 
         # No SRV records, so we fallback to host and 8448

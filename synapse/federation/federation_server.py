@@ -1,18 +1,24 @@
-# Copyright 2015, 2016 OpenMarket Ltd
-# Copyright 2018 New Vector Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019-2021 Matrix.org Federation C.I.C
+# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 import random
 from typing import (
@@ -23,24 +29,30 @@ from typing import (
     Collection,
     Dict,
     List,
+    Mapping,
     Optional,
     Tuple,
     Union,
 )
 
-from matrix_common.regex import glob_to_regex
 from prometheus_client import Counter, Gauge, Histogram
 
-from twisted.internet.abstract import isIPAddress
 from twisted.python import failure
 
-from synapse.api.constants import EduTypes, EventContentFields, EventTypes, Membership
+from synapse.api.constants import (
+    Direction,
+    EduTypes,
+    EventContentFields,
+    EventTypes,
+    Membership,
+)
 from synapse.api.errors import (
     AuthError,
     Codes,
     FederationError,
     IncompatibleRoomVersionError,
     NotFoundError,
+    PartialStateConflictError,
     SynapseError,
     UnsupportedRoomVersionError,
 )
@@ -55,6 +67,7 @@ from synapse.federation.federation_base import (
 )
 from synapse.federation.persistence import TransactionActions
 from synapse.federation.units import Edu, Transaction
+from synapse.handlers.worker_lock import NEW_EVENT_DURING_PURGE_LOCK_NAME
 from synapse.http.servlet import assert_params_in_dict
 from synapse.logging.context import (
     make_deferred_yieldable,
@@ -62,7 +75,9 @@ from synapse.logging.context import (
     run_in_background,
 )
 from synapse.logging.opentracing import (
+    SynapseTags,
     log_kv,
+    set_tag,
     start_active_span_from_edu,
     tag_args,
     trace,
@@ -72,12 +87,11 @@ from synapse.replication.http.federation import (
     ReplicationFederationSendEduRestServlet,
     ReplicationGetQueryRestServlet,
 )
-from synapse.storage.databases.main.events import PartialStateConflictError
 from synapse.storage.databases.main.lock import Lock
 from synapse.storage.databases.main.roommember import extract_heroes_from_room_summary
 from synapse.storage.roommember import MemberSummary
-from synapse.types import JsonDict, StateMap, get_domain_from_id
-from synapse.util import json_decoder, unwrapFirstError
+from synapse.types import JsonDict, StateMap, UserID, get_domain_from_id
+from synapse.util import unwrapFirstError
 from synapse.util.async_helpers import Linearizer, concurrently_execute, gather_results
 from synapse.util.caches.response_cache import ResponseCache
 from synapse.util.stringutils import parse_server_name
@@ -120,12 +134,15 @@ class FederationServer(FederationBase):
     def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
 
+        self.server_name = hs.hostname
         self.handler = hs.get_federation_handler()
-        self._spam_checker = hs.get_spam_checker()
+        self._spam_checker_module_callbacks = hs.get_module_api_callbacks().spam_checker
         self._federation_event_handler = hs.get_federation_event_handler()
         self.state = hs.get_state_handler()
         self._event_auth_handler = hs.get_event_auth_handler()
         self._room_member_handler = hs.get_room_member_handler()
+        self._e2e_keys_handler = hs.get_e2e_keys_handler()
+        self._worker_lock_handler = hs.get_worker_locks_handler()
 
         self._state_storage_controller = hs.get_storage_controllers().state
 
@@ -152,9 +169,9 @@ class FederationServer(FederationBase):
 
         # We cache responses to state queries, as they take a while and often
         # come in waves.
-        self._state_resp_cache: ResponseCache[
-            Tuple[str, Optional[str]]
-        ] = ResponseCache(hs.get_clock(), "state_resp", timeout_ms=30000)
+        self._state_resp_cache: ResponseCache[Tuple[str, Optional[str]]] = (
+            ResponseCache(hs.get_clock(), "state_resp", timeout_ms=30000)
+        )
         self._state_ids_resp_cache: ResponseCache[Tuple[str, str]] = ResponseCache(
             hs.get_clock(), "state_ids_resp", timeout_ms=30000
         )
@@ -216,7 +233,7 @@ class FederationServer(FederationBase):
         return 200, res
 
     async def on_timestamp_to_event_request(
-        self, origin: str, room_id: str, timestamp: int, direction: str
+        self, origin: str, room_id: str, timestamp: int, direction: Direction
     ) -> Tuple[int, Dict[str, Any]]:
         """When we receive a federated `/timestamp_to_event` request,
         handle all of the logic for validating and fetching the event.
@@ -226,7 +243,7 @@ class FederationServer(FederationBase):
             room_id: Room to fetch the event from
             timestamp: The point in time (inclusive) we should navigate from in
                 the given direction to find the closest event.
-            direction: ["f"|"b"] to indicate whether we should navigate forward
+            direction: indicates whether we should navigate forward
                 or backward from the given timestamp to find the closest event.
 
         Returns:
@@ -504,7 +521,7 @@ class FederationServer(FederationBase):
                     logger.error(
                         "Failed to handle PDU %s",
                         event_id,
-                        exc_info=(f.type, f.value, f.getTracebackObject()),  # type: ignore
+                        exc_info=(f.type, f.value, f.getTracebackObject()),
                     )
                     return {"error": str(e)}
 
@@ -529,7 +546,25 @@ class FederationServer(FederationBase):
                 edu_type=edu_dict["edu_type"],
                 content=edu_dict["content"],
             )
-            await self.registry.on_edu(edu.edu_type, origin, edu.content)
+            try:
+                await self.registry.on_edu(edu.edu_type, origin, edu.content)
+            except Exception:
+                # If there was an error handling the EDU, we must reject the
+                # transaction.
+                #
+                # Some EDU types (notably, to-device messages) are, despite their name,
+                # expected to be reliable; if we weren't able to do something with it,
+                # we have to tell the sender that, and the only way the protocol gives
+                # us to do so is by sending an HTTP error back on the transaction.
+                #
+                # We log the exception now, and then raise a new SynapseError to cause
+                # the transaction to be failed.
+                logger.exception("Error handling EDU of type %s", edu.edu_type)
+                raise SynapseError(500, f"Error handing EDU of type {edu.edu_type}")
+
+                # TODO: if the first EDU fails, we should probably abort the whole
+                #   thing rather than carrying on with the rest of them. That would
+                #   probably be best done inside `concurrently_execute`.
 
         await concurrently_execute(
             _process_edu,
@@ -678,6 +713,10 @@ class FederationServer(FederationBase):
         room_id: str,
         caller_supports_partial_state: bool = False,
     ) -> Dict[str, Any]:
+        set_tag(
+            SynapseTags.SEND_JOIN_RESPONSE_IS_PARTIAL_STATE,
+            caller_supports_partial_state,
+        )
         await self._room_member_handler._join_rate_per_room_limiter.ratelimit(  # type: ignore[has-type]
             requester=None,
             key=room_id,
@@ -724,11 +763,11 @@ class FederationServer(FederationBase):
             "event": event_json,
             "state": [p.get_pdu_json(time_now) for p in state_events],
             "auth_chain": [p.get_pdu_json(time_now) for p in auth_chain_events],
-            "org.matrix.msc3706.partial_state": caller_supports_partial_state,
+            "members_omitted": caller_supports_partial_state,
         }
 
         if servers_in_room is not None:
-            resp["org.matrix.msc3706.servers_in_room"] = list(servers_in_room)
+            resp["servers_in_room"] = list(servers_in_room)
 
         return resp
 
@@ -791,7 +830,7 @@ class FederationServer(FederationBase):
             raise IncompatibleRoomVersionError(room_version=room_version.identifier)
 
         # Check that this room supports knocking as defined by its room version
-        if not room_version.msc2403_knocking:
+        if not room_version.knock_join_rule:
             raise SynapseError(
                 403,
                 "This room version does not support knocking",
@@ -835,14 +874,7 @@ class FederationServer(FederationBase):
                 context, self._room_prejoin_state_types
             )
         )
-        return {
-            "knock_room_state": stripped_room_state,
-            # Since v1.37, Synapse incorrectly used "knock_state_events" for this field.
-            # Thus, we also populate a 'knock_state_events' with the same content to
-            # support old instances.
-            # See https://github.com/matrix-org/synapse/issues/14088.
-            "knock_state_events": stripped_room_state,
-        }
+        return {"knock_room_state": stripped_room_state}
 
     async def _on_send_membership_event(
         self, origin: str, content: JsonDict, membership_type: str, room_id: str
@@ -894,7 +926,7 @@ class FederationServer(FederationBase):
                 errcode=Codes.NOT_FOUND,
             )
 
-        if membership_type == Membership.KNOCK and not room_version.msc2403_knocking:
+        if membership_type == Membership.KNOCK and not room_version.knock_join_rule:
             raise SynapseError(
                 403,
                 "This room version does not support knocking",
@@ -918,7 +950,7 @@ class FederationServer(FederationBase):
         # the event is valid to be sent into the room. Currently this is only done
         # if the user is being joined via restricted join rules.
         if (
-            room_version.msc3083_join_rules
+            room_version.restricted_join_rule
             and event.membership == Membership.JOIN
             and EventContentFields.AUTHORISING_USER in event.content
         ):
@@ -926,10 +958,10 @@ class FederationServer(FederationBase):
             authorising_server = get_domain_from_id(
                 event.content[EventContentFields.AUTHORISING_USER]
             )
-            if authorising_server != self.server_name:
+            if not self._is_mine_server_name(authorising_server):
                 raise SynapseError(
                     400,
-                    f"Cannot authorise request from resident server: {authorising_server}",
+                    f"Cannot authorise membership event for {authorising_server}. We can only authorise requests from our own homeserver",
                 )
 
             event.signatures.update(
@@ -989,23 +1021,27 @@ class FederationServer(FederationBase):
 
     @trace
     async def on_claim_client_keys(
-        self, origin: str, content: JsonDict
+        self, query: List[Tuple[str, str, str, int]], always_include_fallback_keys: bool
     ) -> Dict[str, Any]:
-        query = []
-        for user_id, device_keys in content.get("one_time_keys", {}).items():
-            for device_id, algorithm in device_keys.items():
-                query.append((user_id, device_id, algorithm))
+        if any(
+            not self.hs.is_mine(UserID.from_string(user_id))
+            for user_id, _, _, _ in query
+        ):
+            raise SynapseError(400, "User is not hosted on this homeserver")
 
         log_kv({"message": "Claiming one time keys.", "user, device pairs": query})
-        results = await self.store.claim_e2e_one_time_keys(query)
+        results = await self._e2e_keys_handler.claim_local_one_time_keys(
+            query, always_include_fallback_keys=always_include_fallback_keys
+        )
 
-        json_result: Dict[str, Dict[str, dict]] = {}
-        for user_id, device_keys in results.items():
-            for device_id, keys in device_keys.items():
-                for key_id, json_str in keys.items():
-                    json_result.setdefault(user_id, {})[device_id] = {
-                        key_id: json_decoder.decode(json_str)
-                    }
+        json_result: Dict[str, Dict[str, Dict[str, JsonDict]]] = {}
+        for result in results:
+            for user_id, device_keys in result.items():
+                for device_id, keys in device_keys.items():
+                    for key_id, key in keys.items():
+                        json_result.setdefault(user_id, {}).setdefault(device_id, {})[
+                            key_id
+                        ] = key
 
         logger.info(
             "Claimed one-time-keys: %s",
@@ -1114,7 +1150,7 @@ class FederationServer(FederationBase):
             logger.warning("event id %s: %s", pdu.event_id, e)
             raise FederationError("ERROR", 403, str(e), affected=pdu.event_id)
 
-        if await self._spam_checker.should_drop_federated_event(pdu):
+        if await self._spam_checker_module_callbacks.should_drop_federated_event(pdu):
             logger.warning(
                 "Unstaged federated event contains spam, dropping %s", pdu.event_id
             )
@@ -1159,7 +1195,9 @@ class FederationServer(FederationBase):
 
             origin, event = next
 
-            if await self._spam_checker.should_drop_federated_event(event):
+            if await self._spam_checker_module_callbacks.should_drop_federated_event(
+                event
+            ):
                 logger.warning(
                     "Staged federated event contains spam, dropping %s",
                     event.event_id,
@@ -1221,9 +1259,18 @@ class FederationServer(FederationBase):
                 logger.info("handling received PDU in room %s: %s", room_id, event)
                 try:
                     with nested_logging_context(event.event_id):
-                        await self._federation_event_handler.on_receive_pdu(
-                            origin, event
-                        )
+                        # We're taking out a lock within a lock, which could
+                        # lead to deadlocks if we're not careful. However, it is
+                        # safe on this occasion as we only ever take a write
+                        # lock when deleting a room, which we would never do
+                        # while holding the `_INBOUND_EVENT_HANDLING_LOCK_NAME`
+                        # lock.
+                        async with self._worker_lock_handler.acquire_read_write_lock(
+                            NEW_EVENT_DURING_PURGE_LOCK_NAME, room_id, write=False
+                        ):
+                            await self._federation_event_handler.on_receive_pdu(
+                                origin, event
+                            )
                 except FederationError as e:
                     # XXX: Ideally we'd inform the remote we failed to process
                     # the event, but we can't return an error in the transaction
@@ -1234,7 +1281,7 @@ class FederationServer(FederationBase):
                     logger.error(
                         "Failed to handle PDU %s",
                         event.event_id,
-                        exc_info=(f.type, f.value, f.getTracebackObject()),  # type: ignore
+                        exc_info=(f.type, f.value, f.getTracebackObject()),
                     )
 
                 received_ts = await self.store.remove_received_event_from_staging(
@@ -1278,9 +1325,6 @@ class FederationServer(FederationBase):
                 return
             lock = new_lock
 
-    def __str__(self) -> str:
-        return "<ReplicationLayer(%s)>" % self.server_name
-
     async def exchange_third_party_invite(
         self, sender_user_id: str, target_user_id: str, room_id: str, signed: Dict
     ) -> None:
@@ -1301,75 +1345,13 @@ class FederationServer(FederationBase):
         Raises:
             AuthError if the server does not match the ACL
         """
-        acl_event = await self._storage_controllers.state.get_current_state_event(
-            room_id, EventTypes.ServerACL, ""
+        server_acl_evaluator = (
+            await self._storage_controllers.state.get_server_acl_for_room(room_id)
         )
-        if not acl_event or server_matches_acl_event(server_name, acl_event):
-            return
-
-        raise AuthError(code=403, msg="Server is banned from room")
-
-
-def server_matches_acl_event(server_name: str, acl_event: EventBase) -> bool:
-    """Check if the given server is allowed by the ACL event
-
-    Args:
-        server_name: name of server, without any port part
-        acl_event: m.room.server_acl event
-
-    Returns:
-        True if this server is allowed by the ACLs
-    """
-    logger.debug("Checking %s against acl %s", server_name, acl_event.content)
-
-    # first of all, check if literal IPs are blocked, and if so, whether the
-    # server name is a literal IP
-    allow_ip_literals = acl_event.content.get("allow_ip_literals", True)
-    if not isinstance(allow_ip_literals, bool):
-        logger.warning("Ignoring non-bool allow_ip_literals flag")
-        allow_ip_literals = True
-    if not allow_ip_literals:
-        # check for ipv6 literals. These start with '['.
-        if server_name[0] == "[":
-            return False
-
-        # check for ipv4 literals. We can just lift the routine from twisted.
-        if isIPAddress(server_name):
-            return False
-
-    # next,  check the deny list
-    deny = acl_event.content.get("deny", [])
-    if not isinstance(deny, (list, tuple)):
-        logger.warning("Ignoring non-list deny ACL %s", deny)
-        deny = []
-    for e in deny:
-        if _acl_entry_matches(server_name, e):
-            # logger.info("%s matched deny rule %s", server_name, e)
-            return False
-
-    # then the allow list.
-    allow = acl_event.content.get("allow", [])
-    if not isinstance(allow, (list, tuple)):
-        logger.warning("Ignoring non-list allow ACL %s", allow)
-        allow = []
-    for e in allow:
-        if _acl_entry_matches(server_name, e):
-            # logger.info("%s matched allow rule %s", server_name, e)
-            return True
-
-    # everything else should be rejected.
-    # logger.info("%s fell through", server_name)
-    return False
-
-
-def _acl_entry_matches(server_name: str, acl_entry: Any) -> bool:
-    if not isinstance(acl_entry, str):
-        logger.warning(
-            "Ignoring non-str ACL entry '%s' (is %s)", acl_entry, type(acl_entry)
-        )
-        return False
-    regex = glob_to_regex(acl_entry)
-    return bool(regex.match(server_name))
+        if server_acl_evaluator and not server_acl_evaluator.server_matches_acl_event(
+            server_name
+        ):
+            raise AuthError(code=403, msg="Server is banned from room")
 
 
 class FederationHandlerRegistry:
@@ -1443,19 +1425,14 @@ class FederationHandlerRegistry:
         self._edu_type_to_instance[edu_type] = instance_names
 
     async def on_edu(self, edu_type: str, origin: str, content: dict) -> None:
-        if not self.config.server.use_presence and edu_type == EduTypes.PRESENCE:
+        if not self.config.server.track_presence and edu_type == EduTypes.PRESENCE:
             return
 
         # Check if we have a handler on this instance
         handler = self.edu_handlers.get(edu_type)
         if handler:
             with start_active_span_from_edu(content, "handle_edu"):
-                try:
-                    await handler(origin, content)
-                except SynapseError as e:
-                    logger.info("Failed to handle edu %r: %r", edu_type, e)
-                except Exception:
-                    logger.exception("Failed to handle edu %r", edu_type)
+                await handler(origin, content)
             return
 
         # Check if we can route it somewhere else that isn't us
@@ -1464,17 +1441,12 @@ class FederationHandlerRegistry:
             # Pick an instance randomly so that we don't overload one.
             route_to = random.choice(instances)
 
-            try:
-                await self._send_edu(
-                    instance_name=route_to,
-                    edu_type=edu_type,
-                    origin=origin,
-                    content=content,
-                )
-            except SynapseError as e:
-                logger.info("Failed to handle edu %r: %r", edu_type, e)
-            except Exception:
-                logger.exception("Failed to handle edu %r", edu_type)
+            await self._send_edu(
+                instance_name=route_to,
+                edu_type=edu_type,
+                origin=origin,
+                content=content,
+            )
             return
 
         # Oh well, let's just log and move on.
@@ -1498,9 +1470,9 @@ class FederationHandlerRegistry:
 def _get_event_ids_for_partial_state_join(
     join_event: EventBase,
     prev_state_ids: StateMap[str],
-    summary: Dict[str, MemberSummary],
+    summary: Mapping[str, MemberSummary],
 ) -> Collection[str]:
-    """Calculate state to be retuned in a partial_state send_join
+    """Calculate state to be returned in a partial_state send_join
 
     Args:
         join_event: the join event being send_joined
