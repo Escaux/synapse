@@ -1,6 +1,8 @@
---- a/synapse/_scripts/register_new_matrix_user.py
-+++ b/synapse/_scripts/register_new_matrix_user.py
-@@ -36,6 +36,8 @@
+Index: synapse/synapse/_scripts/register_new_matrix_user.py
+===================================================================
+--- synapse.orig/synapse/_scripts/register_new_matrix_user.py
++++ synapse/synapse/_scripts/register_new_matrix_user.py
+@@ -42,6 +42,8 @@ No 'registration_shared_secret' or 'regi
  
  _DEFAULT_SERVER_URL = "http://localhost:8008"
  
@@ -9,8 +11,8 @@
  
  def request_registration(
      user: str,
-@@ -54,7 +56,7 @@
-     r = requests.get(url, verify=False)
+@@ -59,7 +61,7 @@ def request_registration(
+     r = requests.get(url)
  
      if r.status_code != 200:
 -        _print("ERROR! Received %d %s" % (r.status_code, r.reason))
@@ -18,7 +20,7 @@
          if 400 <= r.status_code < 500:
              try:
                  _print(r.json()["error"])
-@@ -98,6 +100,9 @@
+@@ -103,6 +105,9 @@ def request_registration(
                  _print(r.json()["error"])
              except Exception:
                  pass
@@ -28,7 +30,7 @@
          return exit(1)
  
      _print("Success!")
-@@ -213,6 +218,12 @@
+@@ -217,6 +222,12 @@ def main() -> None:
      )
  
      parser.add_argument(
@@ -41,7 +43,7 @@
          "server_url",
          nargs="?",
          help="URL to use to talk to the homeserver. By default, tries to find a "
-@@ -264,9 +275,16 @@
+@@ -269,9 +280,16 @@ def main() -> None:
      if args.admin or args.no_admin:
          admin = args.admin
  
