@@ -2,6 +2,7 @@
 variables:
   DOCKER_REGISTRY: registry.gitlab.com/telepo/smg/artifactory
   DOCKER_IMAGE_NAME: scp-synapse
+  DOCKER_CMMB_IMAGE_NAME: ${DOCKER_REGISTRY}/scp-cmmb
 
 stages:
   - .pre
@@ -58,6 +59,8 @@ Integration Tests:
     strategy: depend
   variables:
     SYNAPSE_CI_DOCKER_IMAGE_VERSION_TAG: "${DOCKER_REGISTRY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
+    CMMB_CI_DOCKER_IMAGE: "${DOCKER_CMMB_IMAGE_NAME}"
+    CMMB_CI_COMMIT_TAG: "1.12.2"
 
 
 cleanup:
