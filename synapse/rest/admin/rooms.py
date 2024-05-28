@@ -1,29 +1,43 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019-2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional, Tuple, cast
-from urllib import parse as urlparse
 
-from synapse.api.constants import EventTypes, JoinRules, Membership
+import attr
+
+from synapse.api.constants import Direction, EventTypes, JoinRules, Membership
 from synapse.api.errors import AuthError, Codes, NotFoundError, SynapseError
 from synapse.api.filtering import Filter
+from synapse.handlers.pagination import (
+    PURGE_ROOM_ACTION_NAME,
+    SHUTDOWN_AND_PURGE_ROOM_ACTION_NAME,
+)
 from synapse.http.servlet import (
     ResolveRoomIdMixin,
     RestServlet,
     assert_params_in_dict,
+    parse_enum,
     parse_integer,
+    parse_json,
     parse_json_object_from_request,
     parse_string,
 )
@@ -35,9 +49,8 @@ from synapse.rest.admin._base import (
 )
 from synapse.storage.databases.main.room import RoomSortOrder
 from synapse.streams.config import PaginationConfig
-from synapse.types import JsonDict, RoomID, UserID, create_requester
+from synapse.types import JsonDict, RoomID, ScheduledTask, UserID, create_requester
 from synapse.types.state import StateFilter
-from synapse.util import json_decoder
 
 if TYPE_CHECKING:
     from synapse.api.auth import Auth
@@ -69,12 +82,11 @@ class RoomRestV2Servlet(RestServlet):
         self._auth = hs.get_auth()
         self._store = hs.get_datastores().main
         self._pagination_handler = hs.get_pagination_handler()
-        self._third_party_rules = hs.get_third_party_event_rules()
+        self._third_party_rules = hs.get_module_api_callbacks().third_party_event_rules
 
     async def on_DELETE(
         self, request: SynapseRequest, room_id: str
     ) -> Tuple[int, JsonDict]:
-
         requester = await self._auth.get_user_by_req(request)
         await assert_user_is_admin(self._auth, requester)
 
@@ -117,18 +129,28 @@ class RoomRestV2Servlet(RestServlet):
                 403, "Shutdown of this room is forbidden", Codes.FORBIDDEN
             )
 
-        delete_id = self._pagination_handler.start_shutdown_and_purge_room(
+        delete_id = await self._pagination_handler.start_shutdown_and_purge_room(
             room_id=room_id,
-            new_room_user_id=content.get("new_room_user_id"),
-            new_room_name=content.get("room_name"),
-            message=content.get("message"),
-            requester_user_id=requester.user.to_string(),
-            block=block,
-            purge=purge,
-            force_purge=force_purge,
+            shutdown_params={
+                "new_room_user_id": content.get("new_room_user_id"),
+                "new_room_name": content.get("room_name"),
+                "message": content.get("message"),
+                "requester_user_id": requester.user.to_string(),
+                "block": block,
+                "purge": purge,
+                "force_purge": force_purge,
+            },
         )
 
         return HTTPStatus.OK, {"delete_id": delete_id}
+
+
+def _convert_delete_task_to_response(task: ScheduledTask) -> JsonDict:
+    return {
+        "delete_id": task.id,
+        "status": task.status,
+        "shutdown_room": task.result,
+    }
 
 
 class DeleteRoomStatusByRoomIdRestServlet(RestServlet):
@@ -143,7 +165,6 @@ class DeleteRoomStatusByRoomIdRestServlet(RestServlet):
     async def on_GET(
         self, request: SynapseRequest, room_id: str
     ) -> Tuple[int, JsonDict]:
-
         await assert_requester_is_admin(self._auth, request)
 
         if not RoomID.is_valid(room_id):
@@ -151,21 +172,16 @@ class DeleteRoomStatusByRoomIdRestServlet(RestServlet):
                 HTTPStatus.BAD_REQUEST, "%s is not a legal room ID" % (room_id,)
             )
 
-        delete_ids = self._pagination_handler.get_delete_ids_by_room(room_id)
-        if delete_ids is None:
-            raise NotFoundError("No delete task for room_id '%s' found" % room_id)
+        delete_tasks = await self._pagination_handler.get_delete_tasks_by_room(room_id)
 
-        response = []
-        for delete_id in delete_ids:
-            delete = self._pagination_handler.get_delete_status(delete_id)
-            if delete:
-                response += [
-                    {
-                        "delete_id": delete_id,
-                        **delete.asdict(),
-                    }
-                ]
-        return HTTPStatus.OK, {"results": cast(JsonDict, response)}
+        if delete_tasks:
+            return HTTPStatus.OK, {
+                "results": [
+                    _convert_delete_task_to_response(task) for task in delete_tasks
+                ],
+            }
+        else:
+            raise NotFoundError("No delete task for room_id '%s' found" % room_id)
 
 
 class DeleteRoomStatusByDeleteIdRestServlet(RestServlet):
@@ -180,14 +196,16 @@ class DeleteRoomStatusByDeleteIdRestServlet(RestServlet):
     async def on_GET(
         self, request: SynapseRequest, delete_id: str
     ) -> Tuple[int, JsonDict]:
-
         await assert_requester_is_admin(self._auth, request)
 
-        delete_status = self._pagination_handler.get_delete_status(delete_id)
-        if delete_status is None:
+        delete_task = await self._pagination_handler.get_delete_task(delete_id)
+        if delete_task is None or (
+            delete_task.action != PURGE_ROOM_ACTION_NAME
+            and delete_task.action != SHUTDOWN_AND_PURGE_ROOM_ACTION_NAME
+        ):
             raise NotFoundError("delete id '%s' not found" % delete_id)
 
-        return HTTPStatus.OK, cast(JsonDict, delete_status.asdict())
+        return HTTPStatus.OK, _convert_delete_task_to_response(delete_task)
 
 
 class ListRoomRestServlet(RestServlet):
@@ -224,15 +242,8 @@ class ListRoomRestServlet(RestServlet):
                 errcode=Codes.INVALID_PARAM,
             )
 
-        direction = parse_string(request, "dir", default="f")
-        if direction not in ("f", "b"):
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Unknown direction: %s" % (direction,),
-                errcode=Codes.INVALID_PARAM,
-            )
-
-        reverse_order = True if direction == "b" else False
+        direction = parse_enum(request, "dir", Direction, default=Direction.FORWARDS)
+        reverse_order = True if direction == Direction.BACKWARDS else False
 
         # Return list of rooms according to parameters
         rooms, total_rooms = await self.store.get_rooms_paginate(
@@ -303,10 +314,13 @@ class RoomRestServlet(RestServlet):
             raise NotFoundError("Room not found")
 
         members = await self.store.get_users_in_room(room_id)
-        ret["joined_local_devices"] = await self.store.count_devices_by_users(members)
-        ret["forgotten"] = await self.store.is_locally_forgotten_room(room_id)
+        result = attr.asdict(ret)
+        result["joined_local_devices"] = await self.store.count_devices_by_users(
+            members
+        )
+        result["forgotten"] = await self.store.is_locally_forgotten_room(room_id)
 
-        return HTTPStatus.OK, ret
+        return HTTPStatus.OK, result
 
     async def on_DELETE(
         self, request: SynapseRequest, room_id: str
@@ -358,11 +372,15 @@ class RoomRestServlet(RestServlet):
 
         ret = await room_shutdown_handler.shutdown_room(
             room_id=room_id,
-            new_room_user_id=content.get("new_room_user_id"),
-            new_room_name=content.get("room_name"),
-            message=content.get("message"),
-            requester_user_id=requester.user.to_string(),
-            block=block,
+            params={
+                "new_room_user_id": content.get("new_room_user_id"),
+                "new_room_name": content.get("room_name"),
+                "message": content.get("message"),
+                "requester_user_id": requester.user.to_string(),
+                "block": block,
+                "purge": purge,
+                "force_purge": force_purge,
+            },
         )
 
         # Purge room
@@ -401,8 +419,8 @@ class RoomMembersRestServlet(RestServlet):
     ) -> Tuple[int, JsonDict]:
         await assert_requester_is_admin(self.auth, request)
 
-        ret = await self.store.get_room(room_id)
-        if not ret:
+        room = await self.store.get_room(room_id)
+        if not room:
             raise NotFoundError("Room not found")
 
         members = await self.store.get_users_in_room(room_id)
@@ -430,21 +448,20 @@ class RoomStateRestServlet(RestServlet):
     ) -> Tuple[int, JsonDict]:
         await assert_requester_is_admin(self.auth, request)
 
-        ret = await self.store.get_room(room_id)
-        if not ret:
+        room = await self.store.get_room(room_id)
+        if not room:
             raise NotFoundError("Room not found")
 
         event_ids = await self._storage_controllers.state.get_current_state_ids(room_id)
         events = await self.store.get_events(event_ids.values())
         now = self.clock.time_msec()
-        room_state = self._event_serializer.serialize_events(events.values(), now)
+        room_state = await self._event_serializer.serialize_events(events.values(), now)
         ret = {"state": room_state}
 
         return HTTPStatus.OK, ret
 
 
 class JoinRoomAliasServlet(ResolveRoomIdMixin, RestServlet):
-
     PATTERNS = admin_patterns("/join/(?P<room_identifier>[^/]*)$")
 
     def __init__(self, hs: "HomeServer"):
@@ -718,7 +735,17 @@ class ForwardExtremitiesRestServlet(ResolveRoomIdMixin, RestServlet):
         room_id, _ = await self.resolve_room_id(room_identifier)
 
         extremities = await self.store.get_forward_extremities_for_room(room_id)
-        return HTTPStatus.OK, {"count": len(extremities), "results": extremities}
+        result = [
+            {
+                "event_id": ex[0],
+                "state_group": ex[1],
+                "depth": ex[2],
+                "received_ts": ex[3],
+            }
+            for ex in extremities
+        ]
+
+        return HTTPStatus.OK, {"count": len(extremities), "results": result}
 
 
 class RoomEventContextServlet(RestServlet):
@@ -748,14 +775,8 @@ class RoomEventContextServlet(RestServlet):
         limit = parse_integer(request, "limit", default=10)
 
         # picking the API shape for symmetry with /messages
-        filter_str = parse_string(request, "filter", encoding="utf-8")
-        if filter_str:
-            filter_json = urlparse.unquote(filter_str)
-            event_filter: Optional[Filter] = Filter(
-                self._hs, json_decoder.decode(filter_json)
-            )
-        else:
-            event_filter = None
+        filter_json = parse_json(request, "filter", encoding="utf-8")
+        event_filter = Filter(self._hs, filter_json) if filter_json else None
 
         event_context = await self.room_context_handler.get_event_context(
             requester,
@@ -773,22 +794,22 @@ class RoomEventContextServlet(RestServlet):
 
         time_now = self.clock.time_msec()
         results = {
-            "events_before": self._event_serializer.serialize_events(
+            "events_before": await self._event_serializer.serialize_events(
                 event_context.events_before,
                 time_now,
                 bundle_aggregations=event_context.aggregations,
             ),
-            "event": self._event_serializer.serialize_event(
+            "event": await self._event_serializer.serialize_event(
                 event_context.event,
                 time_now,
                 bundle_aggregations=event_context.aggregations,
             ),
-            "events_after": self._event_serializer.serialize_events(
+            "events_after": await self._event_serializer.serialize_events(
                 event_context.events_after,
                 time_now,
                 bundle_aggregations=event_context.aggregations,
             ),
-            "state": self._event_serializer.serialize_events(
+            "state": await self._event_serializer.serialize_events(
                 event_context.state, time_now
             ),
             "start": event_context.start,
@@ -886,21 +907,16 @@ class RoomMessagesRestServlet(RestServlet):
         )
         # Twisted will have processed the args by now.
         assert request.args is not None
+
+        filter_json = parse_json(request, "filter", encoding="utf-8")
+        event_filter = Filter(self._hs, filter_json) if filter_json else None
+
         as_client_event = b"raw" not in request.args
-        filter_str = parse_string(request, "filter", encoding="utf-8")
-        if filter_str:
-            filter_json = urlparse.unquote(filter_str)
-            event_filter: Optional[Filter] = Filter(
-                self._hs, json_decoder.decode(filter_json)
-            )
-            if (
-                event_filter
-                and event_filter.filter_json.get("event_format", "client")
-                == "federation"
-            ):
-                as_client_event = False
-        else:
-            event_filter = None
+        if (
+            event_filter
+            and event_filter.filter_json.get("event_format", "client") == "federation"
+        ):
+            as_client_event = False
 
         msgs = await self._pagination_handler.get_messages(
             room_id=room_id,
@@ -949,7 +965,7 @@ class RoomTimestampToEventRestServlet(RestServlet):
         await assert_user_is_admin(self._auth, requester)
 
         timestamp = parse_integer(request, "ts", required=True)
-        direction = parse_string(request, "dir", default="f", allowed_values=["f", "b"])
+        direction = parse_enum(request, "dir", Direction, default=Direction.FORWARDS)
 
         (
             event_id,

@@ -1,17 +1,23 @@
-# Copyright 2018 New Vector
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from typing import List, Optional, Tuple
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
+from typing import Any, List, Tuple
 from unittest.mock import Mock
 
 from twisted.internet.defer import Deferred
@@ -22,7 +28,6 @@ from synapse.logging.context import make_deferred_yieldable
 from synapse.push import PusherConfig, PusherConfigException
 from synapse.rest.client import login, push_rule, pusher, receipts, room
 from synapse.server import HomeServer
-from synapse.storage.databases.main.registration import TokenLookupResult
 from synapse.types import JsonDict
 from synapse.util import Clock
 
@@ -46,14 +51,14 @@ class HTTPPusherTests(HomeserverTestCase):
 
         m = Mock()
 
-        def post_json_get_json(url, body):
+        def post_json_get_json(url: str, body: JsonDict) -> Deferred:
             d: Deferred = Deferred()
             self.push_attempts.append((d, url, body))
             return make_deferred_yieldable(d)
 
         m.post_json_get_json = post_json_get_json
 
-        hs = self.setup_test_homeserver(proxied_blacklisted_http_client=m)
+        hs = self.setup_test_homeserver(proxied_blocklisted_http_client=m)
 
         return hs
 
@@ -67,13 +72,14 @@ class HTTPPusherTests(HomeserverTestCase):
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
+        device_id = user_tuple.device_id
 
-        def test_data(data: Optional[JsonDict]) -> None:
+        def test_data(data: Any) -> None:
             self.get_failure(
                 self.hs.get_pusherpool().add_or_update_pusher(
                     user_id=user_id,
-                    access_token=token_id,
+                    device_id=device_id,
                     kind="http",
                     app_id="m.http",
                     app_display_name="HTTP Push Notifications",
@@ -113,12 +119,13 @@ class HTTPPusherTests(HomeserverTestCase):
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
+        device_id = user_tuple.device_id
 
         self.get_success(
             self.hs.get_pusherpool().add_or_update_pusher(
                 user_id=user_id,
-                access_token=token_id,
+                device_id=device_id,
                 kind="http",
                 app_id="m.http",
                 app_display_name="HTTP Push Notifications",
@@ -140,10 +147,11 @@ class HTTPPusherTests(HomeserverTestCase):
         self.helper.send(room, body="There!", tok=other_access_token)
 
         # Get the stream ordering before it gets sent
-        pushers = self.get_success(
-            self.hs.get_datastores().main.get_pushers_by({"user_name": user_id})
+        pushers = list(
+            self.get_success(
+                self.hs.get_datastores().main.get_pushers_by({"user_name": user_id})
+            )
         )
-        pushers = list(pushers)
         self.assertEqual(len(pushers), 1)
         last_stream_ordering = pushers[0].last_stream_ordering
 
@@ -151,10 +159,11 @@ class HTTPPusherTests(HomeserverTestCase):
         self.pump()
 
         # It hasn't succeeded yet, so the stream ordering shouldn't have moved
-        pushers = self.get_success(
-            self.hs.get_datastores().main.get_pushers_by({"user_name": user_id})
+        pushers = list(
+            self.get_success(
+                self.hs.get_datastores().main.get_pushers_by({"user_name": user_id})
+            )
         )
-        pushers = list(pushers)
         self.assertEqual(len(pushers), 1)
         self.assertEqual(last_stream_ordering, pushers[0].last_stream_ordering)
 
@@ -172,10 +181,11 @@ class HTTPPusherTests(HomeserverTestCase):
         self.pump()
 
         # The stream ordering has increased
-        pushers = self.get_success(
-            self.hs.get_datastores().main.get_pushers_by({"user_name": user_id})
+        pushers = list(
+            self.get_success(
+                self.hs.get_datastores().main.get_pushers_by({"user_name": user_id})
+            )
         )
-        pushers = list(pushers)
         self.assertEqual(len(pushers), 1)
         self.assertTrue(pushers[0].last_stream_ordering > last_stream_ordering)
         last_stream_ordering = pushers[0].last_stream_ordering
@@ -194,10 +204,11 @@ class HTTPPusherTests(HomeserverTestCase):
         self.pump()
 
         # The stream ordering has increased, again
-        pushers = self.get_success(
-            self.hs.get_datastores().main.get_pushers_by({"user_name": user_id})
+        pushers = list(
+            self.get_success(
+                self.hs.get_datastores().main.get_pushers_by({"user_name": user_id})
+            )
         )
-        pushers = list(pushers)
         self.assertEqual(len(pushers), 1)
         self.assertTrue(pushers[0].last_stream_ordering > last_stream_ordering)
 
@@ -229,12 +240,13 @@ class HTTPPusherTests(HomeserverTestCase):
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
+        device_id = user_tuple.device_id
 
         self.get_success(
             self.hs.get_pusherpool().add_or_update_pusher(
                 user_id=user_id,
-                access_token=token_id,
+                device_id=device_id,
                 kind="http",
                 app_id="m.http",
                 app_display_name="HTTP Push Notifications",
@@ -349,12 +361,13 @@ class HTTPPusherTests(HomeserverTestCase):
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
+        device_id = user_tuple.device_id
 
         self.get_success(
             self.hs.get_pusherpool().add_or_update_pusher(
                 user_id=user_id,
-                access_token=token_id,
+                device_id=device_id,
                 kind="http",
                 app_id="m.http",
                 app_display_name="HTTP Push Notifications",
@@ -435,12 +448,13 @@ class HTTPPusherTests(HomeserverTestCase):
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
+        device_id = user_tuple.device_id
 
         self.get_success(
             self.hs.get_pusherpool().add_or_update_pusher(
                 user_id=user_id,
-                access_token=token_id,
+                device_id=device_id,
                 kind="http",
                 app_id="m.http",
                 app_display_name="HTTP Push Notifications",
@@ -512,12 +526,13 @@ class HTTPPusherTests(HomeserverTestCase):
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
+        device_id = user_tuple.device_id
 
         self.get_success(
             self.hs.get_pusherpool().add_or_update_pusher(
                 user_id=user_id,
-                access_token=token_id,
+                device_id=device_id,
                 kind="http",
                 app_id="m.http",
                 app_display_name="HTTP Push Notifications",
@@ -618,12 +633,13 @@ class HTTPPusherTests(HomeserverTestCase):
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
+        device_id = user_tuple.device_id
 
         self.get_success(
             self.hs.get_pusherpool().add_or_update_pusher(
                 user_id=user_id,
-                access_token=token_id,
+                device_id=device_id,
                 kind="http",
                 app_id="m.http",
                 app_display_name="HTTP Push Notifications",
@@ -753,12 +769,13 @@ class HTTPPusherTests(HomeserverTestCase):
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
+        device_id = user_tuple.device_id
 
         self.get_success(
             self.hs.get_pusherpool().add_or_update_pusher(
                 user_id=user_id,
-                access_token=token_id,
+                device_id=device_id,
                 kind="http",
                 app_id="m.http",
                 app_display_name="HTTP Push Notifications",
@@ -767,7 +784,6 @@ class HTTPPusherTests(HomeserverTestCase):
                 lang=None,
                 data={"url": "http://example.com/_matrix/push/v1/notify"},
                 enabled=enabled,
-                device_id=user_tuple.device_id,
             )
         )
 
@@ -884,18 +900,17 @@ class HTTPPusherTests(HomeserverTestCase):
 
     def test_update_different_device_access_token_device_id(self) -> None:
         """Tests that if we create a pusher from one device, the update it from another
-        device, the access token and device ID associated with the pusher stays the
-        same.
+        device, the device ID associated with the pusher stays the same.
         """
         # Create a user with a pusher.
         user_id, access_token = self._make_user_with_pusher("user")
 
-        # Get the token ID for the current access token, since that's what we store in
-        # the pushers table. Also get the device ID from it.
+        # Get the device ID for the current access token, since that's what we store in
+        # the pushers table.
         user_tuple = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
-        token_id = user_tuple.token_id
+        assert user_tuple is not None
         device_id = user_tuple.device_id
 
         # Generate a new access token, and update the pusher with it.
@@ -908,10 +923,9 @@ class HTTPPusherTests(HomeserverTestCase):
         )
         pushers: List[PusherConfig] = list(ret)
 
-        # Check that we still have one pusher, and that the access token and device ID
-        # associated with it didn't change.
+        # Check that we still have one pusher, and that the device ID associated with
+        # it didn't change.
         self.assertEqual(len(pushers), 1)
-        self.assertEqual(pushers[0].access_token, token_id)
         self.assertEqual(pushers[0].device_id, device_id)
 
     @override_config({"experimental_features": {"msc3881_enabled": True}})
@@ -941,9 +955,10 @@ class HTTPPusherTests(HomeserverTestCase):
         )
 
         # Look up the user info for the access token so we can compare the device ID.
-        lookup_result: TokenLookupResult = self.get_success(
+        lookup_result = self.get_success(
             self.hs.get_datastores().main.get_user_by_access_token(access_token)
         )
+        assert lookup_result is not None
 
         # Get the user's devices and check it has the correct device ID.
         channel = self.make_request("GET", "/pushers", access_token=access_token)
@@ -953,3 +968,40 @@ class HTTPPusherTests(HomeserverTestCase):
             channel.json_body["pushers"][0]["org.matrix.msc3881.device_id"],
             lookup_result.device_id,
         )
+
+    @override_config({"push": {"jitter_delay": "10s"}})
+    def test_jitter(self) -> None:
+        """Tests that enabling jitter actually delays sending push."""
+        user_id, access_token = self._make_user_with_pusher("user")
+        other_user_id, other_access_token = self._make_user_with_pusher("otheruser")
+
+        room = self.helper.create_room_as(user_id, tok=access_token)
+        self.helper.join(room=room, user=other_user_id, tok=other_access_token)
+
+        # Send a message and check that it did not generate a push, as it should
+        # be delayed.
+        self.helper.send(room, body="Hi!", tok=other_access_token)
+        self.assertEqual(len(self.push_attempts), 0)
+
+        # Now advance time past the max jitter, and assert the message was sent.
+        self.reactor.advance(15)
+        self.assertEqual(len(self.push_attempts), 1)
+
+        self.push_attempts[0][0].callback({})
+
+        # Now we send a bunch of messages and assert that they were all sent
+        # within the 10s max delay.
+        for _ in range(10):
+            self.helper.send(room, body="Hi!", tok=other_access_token)
+
+        index = 1
+        for _ in range(11):
+            while len(self.push_attempts) > index:
+                self.push_attempts[index][0].callback({})
+                self.pump()
+                index += 1
+
+            self.reactor.advance(1)
+            self.pump()
+
+        self.assertEqual(len(self.push_attempts), 11)

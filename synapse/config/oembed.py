@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Pattern
@@ -19,7 +26,7 @@ from urllib import parse as urlparse
 import attr
 import pkg_resources
 
-from synapse.types import JsonDict
+from synapse.types import JsonDict, StrSequence
 
 from ._base import Config, ConfigError
 from ._util import validate_config
@@ -30,7 +37,7 @@ class OEmbedEndpointConfig:
     # The API endpoint to fetch.
     api_endpoint: str
     # The patterns to match.
-    url_patterns: List[Pattern]
+    url_patterns: List[Pattern[str]]
     # The supported formats.
     formats: Optional[List[str]]
 
@@ -80,7 +87,7 @@ class OembedConfig(Config):
             )
 
     def _parse_and_validate_provider(
-        self, providers: List[JsonDict], config_path: Iterable[str]
+        self, providers: List[JsonDict], config_path: StrSequence
     ) -> Iterable[OEmbedEndpointConfig]:
         # Ensure it is the proper form.
         validate_config(
@@ -112,7 +119,7 @@ class OembedConfig(Config):
                     api_endpoint, patterns, endpoint.get("formats")
                 )
 
-    def _glob_to_pattern(self, glob: str, config_path: Iterable[str]) -> Pattern:
+    def _glob_to_pattern(self, glob: str, config_path: StrSequence) -> Pattern:
         """
         Convert the glob into a sane regular expression to match against. The
         rules followed will be slightly different for the domain portion vs.

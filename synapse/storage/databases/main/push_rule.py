@@ -1,17 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2018 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from typing import (
     TYPE_CHECKING,
@@ -28,8 +34,11 @@ from typing import (
     cast,
 )
 
+from twisted.internet import defer
+
 from synapse.api.errors import StoreError
 from synapse.config.homeserver import ExperimentalConfig
+from synapse.logging.context import make_deferred_yieldable, run_in_background
 from synapse.replication.tcp.streams import PushRulesStream
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import (
@@ -44,15 +53,11 @@ from synapse.storage.databases.main.receipts import ReceiptsWorkerStore
 from synapse.storage.databases.main.roommember import RoomMemberWorkerStore
 from synapse.storage.engines import PostgresEngine, Sqlite3Engine
 from synapse.storage.push_rule import InconsistentRuleException, RuleNotFoundException
-from synapse.storage.util.id_generators import (
-    AbstractStreamIdGenerator,
-    AbstractStreamIdTracker,
-    IdGenerator,
-    StreamIdGenerator,
-)
+from synapse.storage.util.id_generators import IdGenerator, StreamIdGenerator
 from synapse.synapse_rust.push import FilteredPushRules, PushRule, PushRules
 from synapse.types import JsonDict
-from synapse.util import json_encoder
+from synapse.util import json_encoder, unwrapFirstError
+from synapse.util.async_helpers import gather_results
 from synapse.util.caches.descriptors import cached, cachedList
 from synapse.util.caches.stream_change_cache import StreamChangeCache
 
@@ -63,20 +68,34 @@ logger = logging.getLogger(__name__)
 
 
 def _load_rules(
-    rawrules: List[JsonDict],
+    rawrules: List[Tuple[str, int, str, str]],
     enabled_map: Dict[str, bool],
     experimental_config: ExperimentalConfig,
 ) -> FilteredPushRules:
     """Take the DB rows returned from the DB and convert them into a full
     `FilteredPushRules` object.
+
+    Args:
+        rawrules: List of tuples of:
+            * rule ID
+            * Priority lass
+            * Conditions (as serialized JSON)
+            * Actions (as serialized JSON)
+        enabled_map: A dictionary of rule ID to a boolean of whether the rule is
+            enabled. This might not include all rule IDs from rawrules.
+        experimental_config: The `experimental_features` section of the Synapse
+            config. (Used to check if various features are enabled.)
+
+    Returns:
+        A new FilteredPushRules object.
     """
 
     ruleslist = [
         PushRule.from_db(
-            rule_id=rawrule["rule_id"],
-            priority_class=rawrule["priority_class"],
-            conditions=rawrule["conditions"],
-            actions=rawrule["actions"],
+            rule_id=rawrule[0],
+            priority_class=rawrule[1],
+            conditions=rawrule[2],
+            actions=rawrule[3],
         )
         for rawrule in rawrules
     ]
@@ -86,8 +105,10 @@ def _load_rules(
     filtered_rules = FilteredPushRules(
         push_rules,
         enabled_map,
-        msc3664_enabled=experimental_config.msc3664_enabled,
         msc1767_enabled=experimental_config.msc1767_enabled,
+        msc3664_enabled=experimental_config.msc3664_enabled,
+        msc3381_polls_enabled=experimental_config.msc3381_polls_enabled,
+        msc4028_push_encrypted_events=experimental_config.msc4028_push_encrypted_events,
     )
 
     return filtered_rules
@@ -105,6 +126,8 @@ class PushRulesWorkerStore(
     `get_max_push_rules_stream_id` which can be called in the initializer.
     """
 
+    _push_rules_stream_id_gen: StreamIdGenerator
+
     def __init__(
         self,
         database: DatabasePool,
@@ -113,13 +136,18 @@ class PushRulesWorkerStore(
     ):
         super().__init__(database, db_conn, hs)
 
+        self._is_push_writer = (
+            hs.get_instance_name() in hs.config.worker.writers.push_rules
+        )
+
         # In the worker store this is an ID tracker which we overwrite in the non-worker
         # class below that is used on the main process.
-        self._push_rules_stream_id_gen: AbstractStreamIdTracker = StreamIdGenerator(
+        self._push_rules_stream_id_gen = StreamIdGenerator(
             db_conn,
+            hs.get_replication_notifier(),
             "push_rules_stream",
             "stream_id",
-            is_writer=hs.config.worker.worker_app is None,
+            is_writer=self._is_push_writer,
         )
 
         push_rules_prefill, push_rules_id = self.db_pool.get_cache_dict(
@@ -135,6 +163,9 @@ class PushRulesWorkerStore(
             push_rules_id,
             prefilled_cache=push_rules_prefill,
         )
+
+        self._push_rule_id_gen = IdGenerator(db_conn, "push_rules", "id")
+        self._push_rules_enable_id_gen = IdGenerator(db_conn, "push_rules_enable", "id")
 
     def get_max_push_rules_stream_id(self) -> int:
         """Get the position of the push rules stream.
@@ -163,34 +194,44 @@ class PushRulesWorkerStore(
 
     @cached(max_entries=5000)
     async def get_push_rules_for_user(self, user_id: str) -> FilteredPushRules:
-        rows = await self.db_pool.simple_select_list(
-            table="push_rules",
-            keyvalues={"user_name": user_id},
-            retcols=(
-                "user_name",
-                "rule_id",
-                "priority_class",
-                "priority",
-                "conditions",
-                "actions",
+        rows = cast(
+            List[Tuple[str, int, int, str, str]],
+            await self.db_pool.simple_select_list(
+                table="push_rules",
+                keyvalues={"user_name": user_id},
+                retcols=(
+                    "rule_id",
+                    "priority_class",
+                    "priority",
+                    "conditions",
+                    "actions",
+                ),
+                desc="get_push_rules_for_user",
             ),
-            desc="get_push_rules_for_user",
         )
 
-        rows.sort(key=lambda row: (-int(row["priority_class"]), -int(row["priority"])))
+        # Sort by highest priority_class, then highest priority.
+        rows.sort(key=lambda row: (-int(row[1]), -int(row[2])))
 
         enabled_map = await self.get_push_rules_enabled_for_user(user_id)
 
-        return _load_rules(rows, enabled_map, self.hs.config.experimental)
+        return _load_rules(
+            [(row[0], row[1], row[3], row[4]) for row in rows],
+            enabled_map,
+            self.hs.config.experimental,
+        )
 
     async def get_push_rules_enabled_for_user(self, user_id: str) -> Dict[str, bool]:
-        results = await self.db_pool.simple_select_list(
-            table="push_rules_enable",
-            keyvalues={"user_name": user_id},
-            retcols=("rule_id", "enabled"),
-            desc="get_push_rules_enabled_for_user",
+        results = cast(
+            List[Tuple[str, Optional[Union[int, bool]]]],
+            await self.db_pool.simple_select_list(
+                table="push_rules_enable",
+                keyvalues={"user_name": user_id},
+                retcols=("rule_id", "enabled"),
+                desc="get_push_rules_enabled_for_user",
+            ),
         )
-        return {r["rule_id"]: bool(r["enabled"]) for r in results}
+        return {r[0]: bool(r[1]) for r in results}
 
     async def have_push_rules_changed_for_user(
         self, user_id: str, last_id: int
@@ -215,27 +256,50 @@ class PushRulesWorkerStore(
     @cachedList(cached_method_name="get_push_rules_for_user", list_name="user_ids")
     async def bulk_get_push_rules(
         self, user_ids: Collection[str]
-    ) -> Dict[str, FilteredPushRules]:
+    ) -> Mapping[str, FilteredPushRules]:
         if not user_ids:
             return {}
 
-        raw_rules: Dict[str, List[JsonDict]] = {user_id: [] for user_id in user_ids}
+        raw_rules: Dict[str, List[Tuple[str, int, str, str]]] = {
+            user_id: [] for user_id in user_ids
+        }
 
-        rows = await self.db_pool.simple_select_many_batch(
-            table="push_rules",
-            column="user_name",
-            iterable=user_ids,
-            retcols=("*",),
-            desc="bulk_get_push_rules",
-            batch_size=1000,
+        # gatherResults loses all type information.
+        rows, enabled_map_by_user = await make_deferred_yieldable(
+            gather_results(
+                (
+                    cast(
+                        "defer.Deferred[List[Tuple[str, str, int, int, str, str]]]",
+                        run_in_background(
+                            self.db_pool.simple_select_many_batch,
+                            table="push_rules",
+                            column="user_name",
+                            iterable=user_ids,
+                            retcols=(
+                                "user_name",
+                                "rule_id",
+                                "priority_class",
+                                "priority",
+                                "conditions",
+                                "actions",
+                            ),
+                            desc="bulk_get_push_rules",
+                            batch_size=1000,
+                        ),
+                    ),
+                    run_in_background(self.bulk_get_push_rules_enabled, user_ids),
+                ),
+                consumeErrors=True,
+            ).addErrback(unwrapFirstError)
         )
 
-        rows.sort(key=lambda row: (-int(row["priority_class"]), -int(row["priority"])))
+        # Sort by highest priority_class, then highest priority.
+        rows.sort(key=lambda row: (-int(row[2]), -int(row[3])))
 
-        for row in rows:
-            raw_rules.setdefault(row["user_name"], []).append(row)
-
-        enabled_map_by_user = await self.bulk_get_push_rules_enabled(user_ids)
+        for user_name, rule_id, priority_class, _, conditions, actions in rows:
+            raw_rules.setdefault(user_name, []).append(
+                (rule_id, priority_class, conditions, actions)
+            )
 
         results: Dict[str, FilteredPushRules] = {}
 
@@ -254,17 +318,19 @@ class PushRulesWorkerStore(
 
         results: Dict[str, Dict[str, bool]] = {user_id: {} for user_id in user_ids}
 
-        rows = await self.db_pool.simple_select_many_batch(
-            table="push_rules_enable",
-            column="user_name",
-            iterable=user_ids,
-            retcols=("user_name", "rule_id", "enabled"),
-            desc="bulk_get_push_rules_enabled",
-            batch_size=1000,
+        rows = cast(
+            List[Tuple[str, str, Optional[int]]],
+            await self.db_pool.simple_select_many_batch(
+                table="push_rules_enable",
+                column="user_name",
+                iterable=user_ids,
+                retcols=("user_name", "rule_id", "enabled"),
+                desc="bulk_get_push_rules_enabled",
+                batch_size=1000,
+            ),
         )
-        for row in rows:
-            enabled = bool(row["enabled"])
-            results.setdefault(row["user_name"], {})[row["rule_id"]] = enabled
+        for user_name, rule_id, enabled in rows:
+            results.setdefault(user_name, {})[rule_id] = bool(enabled)
         return results
 
     async def get_all_push_rule_updates(
@@ -322,23 +388,6 @@ class PushRulesWorkerStore(
             "get_all_push_rule_updates", get_all_push_rule_updates_txn
         )
 
-
-class PushRuleStore(PushRulesWorkerStore):
-    # Because we have write access, this will be a StreamIdGenerator
-    # (see PushRulesWorkerStore.__init__)
-    _push_rules_stream_id_gen: AbstractStreamIdGenerator
-
-    def __init__(
-        self,
-        database: DatabasePool,
-        db_conn: LoggingDatabaseConnection,
-        hs: "HomeServer",
-    ):
-        super().__init__(database, db_conn, hs)
-
-        self._push_rule_id_gen = IdGenerator(db_conn, "push_rules", "id")
-        self._push_rules_enable_id_gen = IdGenerator(db_conn, "push_rules_enable", "id")
-
     async def add_push_rule(
         self,
         user_id: str,
@@ -349,6 +398,9 @@ class PushRuleStore(PushRulesWorkerStore):
         before: Optional[str] = None,
         after: Optional[str] = None,
     ) -> None:
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
         conditions_json = json_encoder.encode(conditions)
         actions_json = json_encoder.encode(actions)
         async with self._push_rules_stream_id_gen.get_next() as stream_id:
@@ -394,27 +446,31 @@ class PushRuleStore(PushRulesWorkerStore):
         before: str,
         after: str,
     ) -> None:
-        # Lock the table since otherwise we'll have annoying races between the
-        # SELECT here and the UPSERT below.
-        self.database_engine.lock_table(txn, "push_rules")
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
 
         relative_to_rule = before or after
 
-        res = self.db_pool.simple_select_one_txn(
-            txn,
-            table="push_rules",
-            keyvalues={"user_name": user_id, "rule_id": relative_to_rule},
-            retcols=["priority_class", "priority"],
-            allow_none=True,
-        )
+        sql = """
+            SELECT priority, priority_class FROM push_rules
+            WHERE user_name = ? AND rule_id = ?
+        """
 
-        if not res:
+        if isinstance(self.database_engine, PostgresEngine):
+            sql += " FOR UPDATE"
+        else:
+            # Annoyingly SQLite doesn't support row level locking, so lock the whole table
+            self.database_engine.lock_table(txn, "push_rules")
+
+        txn.execute(sql, (user_id, relative_to_rule))
+        row = txn.fetchone()
+
+        if row is None:
             raise RuleNotFoundException(
                 "before/after rule not found: %s" % (relative_to_rule,)
             )
 
-        base_priority_class = res["priority_class"]
-        base_rule_priority = res["priority"]
+        base_rule_priority, base_priority_class = row
 
         if base_priority_class != priority_class:
             raise InconsistentRuleException(
@@ -462,9 +518,21 @@ class PushRuleStore(PushRulesWorkerStore):
         conditions_json: str,
         actions_json: str,
     ) -> None:
-        # Lock the table since otherwise we'll have annoying races between the
-        # SELECT here and the UPSERT below.
-        self.database_engine.lock_table(txn, "push_rules")
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
+        if isinstance(self.database_engine, PostgresEngine):
+            # Postgres doesn't do FOR UPDATE on aggregate functions, so select the rows first
+            # then re-select the count/max below.
+            sql = """
+                SELECT * FROM push_rules
+                WHERE user_name = ? and priority_class = ?
+                FOR UPDATE
+            """
+            txn.execute(sql, (user_id, priority_class))
+        else:
+            # Annoyingly SQLite doesn't support row level locking, so lock the whole table
+            self.database_engine.lock_table(txn, "push_rules")
 
         # find the highest priority rule in that class
         sql = (
@@ -504,6 +572,9 @@ class PushRuleStore(PushRulesWorkerStore):
         actions_json: str,
         update_stream: bool = True,
     ) -> None:
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
         """Specialised version of simple_upsert_txn that picks a push_rule_id
         using the _push_rule_id_gen if it needs to insert the rule. It assumes
         that the "push_rules" table is locked"""
@@ -558,19 +629,19 @@ class PushRuleStore(PushRulesWorkerStore):
         if isinstance(self.database_engine, PostgresEngine):
             sql = """
                 INSERT INTO push_rules_enable (id, user_name, rule_id, enabled)
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, 1)
                 ON CONFLICT DO NOTHING
             """
         elif isinstance(self.database_engine, Sqlite3Engine):
             sql = """
                 INSERT OR IGNORE INTO push_rules_enable (id, user_name, rule_id, enabled)
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, 1)
             """
         else:
             raise RuntimeError("Unknown database engine")
 
         new_enable_id = self._push_rules_enable_id_gen.get_next()
-        txn.execute(sql, (new_enable_id, user_id, rule_id, 1))
+        txn.execute(sql, (new_enable_id, user_id, rule_id))
 
     async def delete_push_rule(self, user_id: str, rule_id: str) -> None:
         """
@@ -582,6 +653,8 @@ class PushRuleStore(PushRulesWorkerStore):
             user_id: The matrix ID of the push rule owner
             rule_id: The rule_id of the rule to be deleted
         """
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
 
         def delete_push_rule_txn(
             txn: LoggingTransaction,
@@ -633,6 +706,9 @@ class PushRuleStore(PushRulesWorkerStore):
         Raises:
             RuleNotFoundException if the rule does not exist.
         """
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
         async with self._push_rules_stream_id_gen.get_next() as stream_id:
             event_stream_ordering = self._stream_id_gen.get_current_token()
             await self.db_pool.runInteraction(
@@ -656,6 +732,9 @@ class PushRuleStore(PushRulesWorkerStore):
         enabled: bool,
         is_default_rule: bool,
     ) -> None:
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
         new_id = self._push_rules_enable_id_gen.get_next()
 
         if not is_default_rule:
@@ -725,6 +804,9 @@ class PushRuleStore(PushRulesWorkerStore):
         Raises:
             RuleNotFoundException if the rule does not exist.
         """
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
         actions_json = json_encoder.encode(actions)
 
         def set_push_rule_actions_txn(
@@ -794,6 +876,9 @@ class PushRuleStore(PushRulesWorkerStore):
         op: str,
         data: Optional[JsonDict] = None,
     ) -> None:
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
         values = {
             "stream_id": stream_id,
             "event_stream_ordering": event_stream_ordering,
@@ -811,9 +896,6 @@ class PushRuleStore(PushRulesWorkerStore):
             self.push_rules_stream_cache.entity_has_changed, user_id, stream_id
         )
 
-    def get_max_push_rules_stream_id(self) -> int:
-        return self._push_rules_stream_id_gen.get_current_token()
-
     async def copy_push_rule_from_room_to_room(
         self, new_room_id: str, user_id: str, rule: PushRule
     ) -> None:
@@ -824,6 +906,9 @@ class PushRuleStore(PushRulesWorkerStore):
             user_id : ID of user the push rule belongs to.
             rule: A push rule.
         """
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
         # Create new rule id
         rule_id_scope = "/".join(rule.rule_id.split("/")[:-1])
         new_rule_id = rule_id_scope + "/" + new_room_id
@@ -859,6 +944,9 @@ class PushRuleStore(PushRulesWorkerStore):
             new_room_id: ID of the new room.
             user_id: ID of user to copy push rules for.
         """
+        if not self._is_push_writer:
+            raise Exception("Not a push writer")
+
         # Retrieve push rules for this user
         user_push_rules = await self.get_push_rules_for_user(user_id)
 

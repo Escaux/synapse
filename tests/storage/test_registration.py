@@ -1,22 +1,29 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from twisted.test.proto_helpers import MemoryReactor
 
 from synapse.api.constants import UserTypes
 from synapse.api.errors import ThreepidValidationError
 from synapse.server import HomeServer
-from synapse.types import JsonDict, UserID
+from synapse.types import JsonDict, UserID, UserInfo
 from synapse.util import Clock
 
 from tests.unittest import HomeserverTestCase, override_config
@@ -35,22 +42,22 @@ class RegistrationStoreTestCase(HomeserverTestCase):
         self.get_success(self.store.register_user(self.user_id, self.pwhash))
 
         self.assertEqual(
-            {
-                # TODO(paul): Surely this field should be 'user_id', not 'name'
-                "name": self.user_id,
-                "password_hash": self.pwhash,
-                "admin": 0,
-                "is_guest": 0,
-                "consent_version": None,
-                "consent_ts": None,
-                "consent_server_notice_sent": None,
-                "appservice_id": None,
-                "creation_ts": 0,
-                "user_type": None,
-                "deactivated": 0,
-                "shadow_banned": 0,
-                "approved": 1,
-            },
+            UserInfo(
+                user_id=UserID.from_string(self.user_id),
+                is_admin=False,
+                is_guest=False,
+                consent_server_notice_sent=None,
+                consent_ts=None,
+                consent_version=None,
+                appservice_id=None,
+                creation_ts=0,
+                user_type=None,
+                is_deactivated=False,
+                locked=False,
+                is_shadow_banned=False,
+                approved=True,
+                suspended=False,
+            ),
             (self.get_success(self.store.get_user_by_id(self.user_id))),
         )
 
@@ -63,9 +70,11 @@ class RegistrationStoreTestCase(HomeserverTestCase):
 
         user = self.get_success(self.store.get_user_by_id(self.user_id))
         assert user
-        self.assertEqual(user["consent_version"], "1")
-        self.assertGreater(user["consent_ts"], before_consent)
-        self.assertLess(user["consent_ts"], self.clock.time_msec())
+        self.assertEqual(user.consent_version, "1")
+        self.assertIsNotNone(user.consent_ts)
+        assert user.consent_ts is not None
+        self.assertGreater(user.consent_ts, before_consent)
+        self.assertLess(user.consent_ts, self.clock.time_msec())
 
     def test_add_tokens(self) -> None:
         self.get_success(self.store.register_user(self.user_id, self.pwhash))
@@ -213,7 +222,7 @@ class ApprovalRequiredRegistrationTestCase(HomeserverTestCase):
 
         user = self.get_success(self.store.get_user_by_id(self.user_id))
         assert user is not None
-        self.assertTrue(user["approved"])
+        self.assertTrue(user.approved)
 
         approved = self.get_success(self.store.is_user_approved(self.user_id))
         self.assertTrue(approved)
@@ -226,7 +235,7 @@ class ApprovalRequiredRegistrationTestCase(HomeserverTestCase):
 
         user = self.get_success(self.store.get_user_by_id(self.user_id))
         assert user is not None
-        self.assertFalse(user["approved"])
+        self.assertFalse(user.approved)
 
         approved = self.get_success(self.store.is_user_approved(self.user_id))
         self.assertFalse(approved)
@@ -246,7 +255,7 @@ class ApprovalRequiredRegistrationTestCase(HomeserverTestCase):
         user = self.get_success(self.store.get_user_by_id(self.user_id))
         self.assertIsNotNone(user)
         assert user is not None
-        self.assertEqual(user["approved"], 1)
+        self.assertEqual(user.approved, 1)
 
         approved = self.get_success(self.store.is_user_approved(self.user_id))
         self.assertTrue(approved)

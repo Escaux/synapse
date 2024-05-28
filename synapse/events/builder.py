@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -25,10 +32,11 @@ from synapse.api.room_versions import (
 )
 from synapse.crypto.event_signing import add_hashes_and_signatures
 from synapse.event_auth import auth_types_for_event
-from synapse.events import EventBase, _EventInternalMetadata, make_event_from_dict
+from synapse.events import EventBase, make_event_from_dict
 from synapse.state import StateHandler
 from synapse.storage.databases.main import DataStore
-from synapse.types import EventID, JsonDict
+from synapse.synapse_rust.events import EventInternalMetadata
+from synapse.types import EventID, JsonDict, StrCollection
 from synapse.types.state import StateFilter
 from synapse.util import Clock
 from synapse.util.stringutils import random_string
@@ -87,8 +95,8 @@ class EventBuilder:
     _redacts: Optional[str] = None
     _origin_server_ts: Optional[int] = None
 
-    internal_metadata: _EventInternalMetadata = attr.Factory(
-        lambda: _EventInternalMetadata({})
+    internal_metadata: EventInternalMetadata = attr.Factory(
+        lambda: EventInternalMetadata({})
     )
 
     @property
@@ -136,7 +144,7 @@ class EventBuilder:
 
         format_version = self.room_version.event_format
         # The types of auth/prev events changes between event versions.
-        prev_events: Union[List[str], List[Tuple[str, Dict[str, str]]]]
+        prev_events: Union[StrCollection, List[Tuple[str, Dict[str, str]]]]
         auth_events: Union[List[str], List[Tuple[str, Dict[str, str]]]]
         if format_version == EventFormatVersions.ROOM_V1_V2:
             auth_events = await self._store.add_event_hashes(auth_event_ids)
@@ -173,7 +181,9 @@ class EventBuilder:
         if self.is_state():
             event_dict["state_key"] = self._state_key
 
-        if self._redacts is not None:
+        # MSC2174 moves the redacts property to the content, it is invalid to
+        # provide it as a top-level property.
+        if self._redacts is not None and not self.room_version.updated_redaction_rules:
             event_dict["redacts"] = self._redacts
 
         if self._origin_server_ts is not None:

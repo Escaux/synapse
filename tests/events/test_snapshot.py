@@ -1,20 +1,32 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
+from twisted.test.proto_helpers import MemoryReactor
+
+from synapse.events import EventBase
 from synapse.events.snapshot import EventContext
 from synapse.rest import admin
 from synapse.rest.client import login, room
+from synapse.server import HomeServer
+from synapse.util import Clock
 
 from tests import unittest
 from tests.test_utils.event_injection import create_event
@@ -27,7 +39,7 @@ class TestEventContext(unittest.HomeserverTestCase):
         room.register_servlets,
     ]
 
-    def prepare(self, reactor, clock, hs):
+    def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
         self.store = hs.get_datastores().main
         self._storage_controllers = hs.get_storage_controllers()
 
@@ -35,7 +47,7 @@ class TestEventContext(unittest.HomeserverTestCase):
         self.user_tok = self.login("u1", "pass")
         self.room_id = self.helper.create_room_as(tok=self.user_tok)
 
-    def test_serialize_deserialize_msg(self):
+    def test_serialize_deserialize_msg(self) -> None:
         """Test that an EventContext for a message event is the same after
         serialize/deserialize.
         """
@@ -51,7 +63,7 @@ class TestEventContext(unittest.HomeserverTestCase):
 
         self._check_serialize_deserialize(event, context)
 
-    def test_serialize_deserialize_state_no_prev(self):
+    def test_serialize_deserialize_state_no_prev(self) -> None:
         """Test that an EventContext for a state event (with not previous entry)
         is the same after serialize/deserialize.
         """
@@ -67,7 +79,7 @@ class TestEventContext(unittest.HomeserverTestCase):
 
         self._check_serialize_deserialize(event, context)
 
-    def test_serialize_deserialize_state_prev(self):
+    def test_serialize_deserialize_state_prev(self) -> None:
         """Test that an EventContext for a state event (which replaces a
         previous entry) is the same after serialize/deserialize.
         """
@@ -84,7 +96,9 @@ class TestEventContext(unittest.HomeserverTestCase):
 
         self._check_serialize_deserialize(event, context)
 
-    def _check_serialize_deserialize(self, event, context):
+    def _check_serialize_deserialize(
+        self, event: EventBase, context: EventContext
+    ) -> None:
         serialized = self.get_success(context.serialize(event, self.store))
 
         d_context = EventContext.deserialize(self._storage_controllers, serialized)
@@ -94,8 +108,7 @@ class TestEventContext(unittest.HomeserverTestCase):
         self.assertEqual(
             context.state_group_before_event, d_context.state_group_before_event
         )
-        self.assertEqual(context.prev_group, d_context.prev_group)
-        self.assertEqual(context.delta_ids, d_context.delta_ids)
+        self.assertEqual(context.state_group_deltas, d_context.state_group_deltas)
         self.assertEqual(context.app_service, d_context.app_service)
 
         self.assertEqual(

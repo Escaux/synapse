@@ -1,20 +1,26 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
-# Copyright 2018 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Pattern, Tuple, cast
+from typing import TYPE_CHECKING, List, Optional, Pattern, Sequence, Tuple, cast
 
 from synapse.appservice import (
     ApplicationService,
@@ -35,7 +41,7 @@ from synapse.storage.databases.main.events_worker import EventsWorkerStore
 from synapse.storage.databases.main.roommember import RoomMemberWorkerStore
 from synapse.storage.types import Cursor
 from synapse.storage.util.sequence import build_sequence_generator
-from synapse.types import DeviceListUpdates, JsonDict
+from synapse.types import DeviceListUpdates, JsonMapping
 from synapse.util import json_encoder
 from synapse.util.caches.descriptors import _CacheContext, cached
 
@@ -156,7 +162,7 @@ class ApplicationServiceWorkerStore(RoomMemberWorkerStore):
         room_id: str,
         app_service: "ApplicationService",
         cache_context: _CacheContext,
-    ) -> List[str]:
+    ) -> Sequence[str]:
         """
         Get all users in a room that the appservice controls.
 
@@ -197,16 +203,21 @@ class ApplicationServiceTransactionWorkerStore(
         Returns:
             A list of ApplicationServices, which may be empty.
         """
-        results = await self.db_pool.simple_select_list(
-            "application_services_state", {"state": state.value}, ["as_id"]
+        results = cast(
+            List[Tuple[str]],
+            await self.db_pool.simple_select_list(
+                table="application_services_state",
+                keyvalues={"state": state.value},
+                retcols=("as_id",),
+            ),
         )
         # NB: This assumes this class is linked with ApplicationServiceStore
         as_list = self.get_app_services()
         services = []
 
-        for res in results:
+        for (as_id,) in results:
             for service in as_list:
-                if service.id == res["as_id"]:
+                if service.id == as_id:
                     services.append(service)
         return services
 
@@ -257,9 +268,9 @@ class ApplicationServiceTransactionWorkerStore(
     async def create_appservice_txn(
         self,
         service: ApplicationService,
-        events: List[EventBase],
-        ephemeral: List[JsonDict],
-        to_device_messages: List[JsonDict],
+        events: Sequence[EventBase],
+        ephemeral: List[JsonMapping],
+        to_device_messages: List[JsonMapping],
         one_time_keys_count: TransactionOneTimeKeysCount,
         unused_fallback_keys: TransactionUnusedFallbackKeys,
         device_list_summary: DeviceListUpdates,
@@ -343,21 +354,15 @@ class ApplicationServiceTransactionWorkerStore(
 
         def _get_oldest_unsent_txn(
             txn: LoggingTransaction,
-        ) -> Optional[Dict[str, Any]]:
+        ) -> Optional[Tuple[int, str]]:
             # Monotonically increasing txn ids, so just select the smallest
             # one in the txns table (we delete them when they are sent)
             txn.execute(
-                "SELECT * FROM application_services_txns WHERE as_id=?"
+                "SELECT txn_id, event_ids FROM application_services_txns WHERE as_id=?"
                 " ORDER BY txn_id ASC LIMIT 1",
                 (service.id,),
             )
-            rows = self.db_pool.cursor_to_dict(txn)
-            if not rows:
-                return None
-
-            entry = rows[0]
-
-            return entry
+            return cast(Optional[Tuple[int, str]], txn.fetchone())
 
         entry = await self.db_pool.runInteraction(
             "get_oldest_unsent_appservice_txn", _get_oldest_unsent_txn
@@ -366,8 +371,9 @@ class ApplicationServiceTransactionWorkerStore(
         if not entry:
             return None
 
-        event_ids = db_to_json(entry["event_ids"])
+        txn_id, event_ids_str = entry
 
+        event_ids = db_to_json(event_ids_str)
         events = await self.get_events_as_list(event_ids)
 
         # TODO: to-device messages, one-time key counts, device list summaries and unused
@@ -375,7 +381,7 @@ class ApplicationServiceTransactionWorkerStore(
         #       We likely want to populate those for reliability.
         return AppServiceTransaction(
             service=service,
-            id=entry["txn_id"],
+            id=txn_id,
             events=events,
             ephemeral=[],
             to_device_messages=[],

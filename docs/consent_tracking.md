@@ -8,9 +8,9 @@ to the server until they have.
 There are several parts to this functionality; each requires some specific
 configuration in `homeserver.yaml` to be enabled.
 
-Note that various parts of the configuation and this document refer to the
+Note that various parts of the configuration and this document refer to the
 "privacy policy": agreement with a privacy policy is one particular use of this
-feature, but of course adminstrators can specify other terms and conditions
+feature, but of course administrators can specify other terms and conditions
 unrelated to "privacy" per se.
 
 Collecting policy agreement from a user
@@ -24,7 +24,7 @@ To enable this, first create templates for the policy and success pages.
 These should be stored on the local filesystem.
 
 These templates use the [Jinja2](http://jinja.pocoo.org) templating language,
-and [docs/privacy_policy_templates](https://github.com/matrix-org/synapse/tree/develop/docs/privacy_policy_templates/)
+and [docs/privacy_policy_templates](https://github.com/element-hq/synapse/tree/develop/docs/privacy_policy_templates/)
 gives examples of the sort of thing that can be done.
 
 Note that the templates must be stored under a name giving the language of the

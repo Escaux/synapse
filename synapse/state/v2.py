@@ -1,16 +1,22 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import heapq
 import itertools
@@ -19,12 +25,10 @@ from typing import (
     Any,
     Awaitable,
     Callable,
-    Collection,
     Dict,
     Generator,
     Iterable,
     List,
-    Mapping,
     Optional,
     Sequence,
     Set,
@@ -39,7 +43,7 @@ from synapse.api.constants import EventTypes
 from synapse.api.errors import AuthError
 from synapse.api.room_versions import RoomVersion
 from synapse.events import EventBase
-from synapse.types import MutableStateMap, StateMap
+from synapse.types import MutableStateMap, StateMap, StrCollection
 
 logger = logging.getLogger(__name__)
 
@@ -48,22 +52,19 @@ class Clock(Protocol):
     # This is usually synapse.util.Clock, but it's replaced with a FakeClock in tests.
     # We only ever sleep(0) though, so that other async functions can make forward
     # progress without waiting for stateres to complete.
-    def sleep(self, duration_ms: float) -> Awaitable[None]:
-        ...
+    def sleep(self, duration_ms: float) -> Awaitable[None]: ...
 
 
 class StateResolutionStore(Protocol):
     # This is usually synapse.state.StateResolutionStore, but it's replaced with a
     # TestStateResolutionStore in tests.
     def get_events(
-        self, event_ids: Collection[str], allow_rejected: bool = False
-    ) -> Awaitable[Dict[str, EventBase]]:
-        ...
+        self, event_ids: StrCollection, allow_rejected: bool = False
+    ) -> Awaitable[Dict[str, EventBase]]: ...
 
     def get_auth_chain_difference(
         self, room_id: str, state_sets: List[Set[str]]
-    ) -> Awaitable[Set[str]]:
-        ...
+    ) -> Awaitable[Set[str]]: ...
 
 
 # We want to await to the reactor occasionally during state res when dealing
@@ -270,7 +271,7 @@ async def _get_power_level_for_sender(
 
 async def _get_auth_chain_difference(
     room_id: str,
-    state_sets: Sequence[Mapping[Any, str]],
+    state_sets: Sequence[StateMap[str]],
     unpersisted_events: Dict[str, EventBase],
     state_res_store: StateResolutionStore,
 ) -> Set[str]:
@@ -366,7 +367,7 @@ async def _get_auth_chain_difference(
         union = unpersisted_set_ids[0].union(*unpersisted_set_ids[1:])
         intersection = unpersisted_set_ids[0].intersection(*unpersisted_set_ids[1:])
 
-        auth_difference_unpersisted_part: Collection[str] = union - intersection
+        auth_difference_unpersisted_part: StrCollection = union - intersection
     else:
         auth_difference_unpersisted_part = ()
         state_sets_ids = [set(state_set.values()) for state_set in state_sets]
@@ -406,7 +407,7 @@ def _seperate(
 
     # mypy doesn't understand that discarding None above means that conflicted
     # state is StateMap[Set[str]], not StateMap[Set[Optional[Str]]].
-    return unconflicted_state, conflicted_state  # type: ignore
+    return unconflicted_state, conflicted_state  # type: ignore[return-value]
 
 
 def _is_power_event(event: EventBase) -> bool:
@@ -667,7 +668,7 @@ async def _mainline_sort(
     order_map = {}
     for idx, ev_id in enumerate(event_ids, start=1):
         depth = await _get_mainline_depth_for_event(
-            event_map[ev_id], mainline_map, event_map, state_res_store
+            clock, event_map[ev_id], mainline_map, event_map, state_res_store
         )
         order_map[ev_id] = (depth, event_map[ev_id].origin_server_ts, ev_id)
 
@@ -682,6 +683,7 @@ async def _mainline_sort(
 
 
 async def _get_mainline_depth_for_event(
+    clock: Clock,
     event: EventBase,
     mainline_map: Dict[str, int],
     event_map: Dict[str, EventBase],
@@ -704,6 +706,7 @@ async def _get_mainline_depth_for_event(
 
     # We do an iterative search, replacing `event with the power level in its
     # auth events (if any)
+    idx = 0
     while tmp_event:
         depth = mainline_map.get(tmp_event.event_id)
         if depth is not None:
@@ -720,6 +723,11 @@ async def _get_mainline_depth_for_event(
                 tmp_event = aev
                 break
 
+        idx += 1
+
+        if idx % _AWAIT_AFTER_ITERATIONS == 0:
+            await clock.sleep(0)
+
     # Didn't find a power level auth event, so we just return 0
     return 0
 
@@ -731,8 +739,7 @@ async def _get_event(
     event_map: Dict[str, EventBase],
     state_res_store: StateResolutionStore,
     allow_none: Literal[False] = False,
-) -> EventBase:
-    ...
+) -> EventBase: ...
 
 
 @overload
@@ -742,8 +749,7 @@ async def _get_event(
     event_map: Dict[str, EventBase],
     state_res_store: StateResolutionStore,
     allow_none: Literal[True],
-) -> Optional[EventBase]:
-    ...
+) -> Optional[EventBase]: ...
 
 
 async def _get_event(

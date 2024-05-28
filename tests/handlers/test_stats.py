@@ -1,18 +1,24 @@
-# Copyright 2019 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from twisted.test.proto_helpers import MemoryReactor
 
@@ -31,7 +37,6 @@ EXPT_NUM_STATE_EVTS_IN_FRESH_PRIVATE_ROOM = 6
 
 
 class StatsRoomTests(unittest.HomeserverTestCase):
-
     servlets = [
         admin.register_servlets_for_client_rest_resource,
         room.register_servlets,
@@ -69,10 +74,14 @@ class StatsRoomTests(unittest.HomeserverTestCase):
             )
         )
 
-    async def get_all_room_state(self) -> List[Dict[str, Any]]:
-        return await self.store.db_pool.simple_select_list(
-            "room_stats_state", None, retcols=("name", "topic", "canonical_alias")
+    async def get_all_room_state(self) -> List[Optional[str]]:
+        rows = cast(
+            List[Tuple[Optional[str]]],
+            await self.store.db_pool.simple_select_list(
+                "room_stats_state", None, retcols=("topic",)
+            ),
         )
+        return [r[0] for r in rows]
 
     def _get_current_stats(
         self, stats_type: str, stat_id: str
@@ -81,7 +90,7 @@ class StatsRoomTests(unittest.HomeserverTestCase):
 
         cols = list(stats.ABSOLUTE_STATS_FIELDS[stats_type])
 
-        return self.get_success(
+        row = self.get_success(
             self.store.db_pool.simple_select_one(
                 table + "_current",
                 {id_col: stat_id},
@@ -89,6 +98,8 @@ class StatsRoomTests(unittest.HomeserverTestCase):
                 allow_none=True,
             )
         )
+
+        return None if row is None else dict(zip(cols, row))
 
     def _perform_background_initial_update(self) -> None:
         # Do the initial population of the stats via the background update
@@ -131,7 +142,7 @@ class StatsRoomTests(unittest.HomeserverTestCase):
         r = self.get_success(self.get_all_room_state())
 
         self.assertEqual(len(r), 1)
-        self.assertEqual(r[0]["topic"], "foo")
+        self.assertEqual(r[0], "foo")
 
     def test_create_user(self) -> None:
         """

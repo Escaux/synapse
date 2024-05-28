@@ -1,27 +1,36 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import os
 
+from twisted.test.proto_helpers import MemoryReactor
+
 import synapse.rest.admin
 from synapse.rest.client import login, room, sync
+from synapse.server import HomeServer
+from synapse.util import Clock
 
 from tests import unittest
 
 
 class ConsentNoticesTests(unittest.HomeserverTestCase):
-
     servlets = [
         sync.register_servlets,
         synapse.rest.admin.register_servlets_for_client_rest_resource,
@@ -29,8 +38,7 @@ class ConsentNoticesTests(unittest.HomeserverTestCase):
         room.register_servlets,
     ]
 
-    def make_homeserver(self, reactor, clock):
-
+    def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
         tmpdir = self.mktemp()
         os.mkdir(tmpdir)
         self.consent_notice_message = "consent %(consent_uri)s"
@@ -53,15 +61,13 @@ class ConsentNoticesTests(unittest.HomeserverTestCase):
             "room_name": "Server Notices",
         }
 
-        hs = self.setup_test_homeserver(config=config)
+        return self.setup_test_homeserver(config=config)
 
-        return hs
-
-    def prepare(self, reactor, clock, hs):
+    def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
         self.user_id = self.register_user("bob", "abc123")
         self.access_token = self.login("bob", "abc123")
 
-    def test_get_sync_message(self):
+    def test_get_sync_message(self) -> None:
         """
         When user consent server notices are enabled, a sync will cause a notice
         to fire (in a room which the user is invited to). The notice contains

@@ -1,14 +1,16 @@
---- a/synapse/storage/databases/main/room.py
-+++ b/synapse/storage/databases/main/room.py
-@@ -13,6 +13,7 @@
- # See the License for the specific language governing permissions and
- # limitations under the License.
+Index: synapse/synapse/storage/databases/main/room.py
+===================================================================
+--- synapse.orig/synapse/storage/databases/main/room.py
++++ synapse/synapse/storage/databases/main/room.py
+@@ -20,6 +20,7 @@
+ #
+ #
  
 +import json
  import logging
  from abc import abstractmethod
  from enum import Enum
-@@ -419,6 +420,26 @@
+@@ -514,6 +515,26 @@ class RoomWorkerStore(CacheInvalidationW
                  search_term.lower(),
              ]
  
@@ -35,7 +37,7 @@
          room_type_clause, args = self._construct_room_type_where_clause(
              search_filter.get(PublicRoomsFilterFields.ROOM_TYPES, None)
              if search_filter
-@@ -432,6 +453,9 @@
+@@ -527,6 +548,9 @@ class RoomWorkerStore(CacheInvalidationW
          if where_clauses:
              where_clause = " AND " + " AND ".join(where_clauses)
  
@@ -45,9 +47,11 @@
          dir = "DESC" if forwards else "ASC"
          sql = f"""
              SELECT
---- a/synapse/api/constants.py
-+++ b/synapse/api/constants.py
-@@ -271,6 +271,7 @@
+Index: synapse/synapse/api/constants.py
+===================================================================
+--- synapse.orig/synapse/api/constants.py
++++ synapse/synapse/api/constants.py
+@@ -285,6 +285,7 @@ class PublicRoomsFilterFields:
      """
  
      GENERIC_SEARCH_TERM: Final = "generic_search_term"

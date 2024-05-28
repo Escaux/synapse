@@ -1,17 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
-# Copyright 2018 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import functools
 import inspect
 import logging
@@ -35,6 +41,8 @@ from typing import (
     cast,
 )
 from weakref import WeakValueDictionary
+
+import attr
 
 from twisted.internet import defer
 from twisted.python.failure import Failure
@@ -220,7 +228,9 @@ class DeferredCacheDescriptor(_CacheDescriptorBase):
         self.iterable = iterable
         self.prune_unread_entries = prune_unread_entries
 
-    def __get__(self, obj: Optional[Any], owner: Optional[Type]) -> Callable[..., Any]:
+    def __get__(
+        self, obj: Optional[Any], owner: Optional[Type]
+    ) -> Callable[..., "defer.Deferred[Any]"]:
         cache: DeferredCache[CacheKey, Any] = DeferredCache(
             name=self.name,
             max_entries=self.max_entries,
@@ -232,7 +242,7 @@ class DeferredCacheDescriptor(_CacheDescriptorBase):
         get_cache_key = self.cache_key_builder
 
         @functools.wraps(self.orig)
-        def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        def _wrapped(*args: Any, **kwargs: Any) -> "defer.Deferred[Any]":
             # If we're passed a cache_context then we'll want to call its invalidate()
             # whenever we are invalidated
             invalidate_callback = kwargs.pop("on_invalidate", None)
@@ -464,6 +474,35 @@ class _CacheContext:
         )
 
 
+@attr.s(auto_attribs=True, slots=True, frozen=True)
+class _CachedFunctionDescriptor:
+    """Helper for `@cached`, we name it so that we can hook into it with mypy
+    plugin."""
+
+    max_entries: int
+    num_args: Optional[int]
+    uncached_args: Optional[Collection[str]]
+    tree: bool
+    cache_context: bool
+    iterable: bool
+    prune_unread_entries: bool
+    name: Optional[str]
+
+    def __call__(self, orig: F) -> CachedFunction[F]:
+        d = DeferredCacheDescriptor(
+            orig,
+            max_entries=self.max_entries,
+            num_args=self.num_args,
+            uncached_args=self.uncached_args,
+            tree=self.tree,
+            cache_context=self.cache_context,
+            iterable=self.iterable,
+            prune_unread_entries=self.prune_unread_entries,
+            name=self.name,
+        )
+        return cast(CachedFunction[F], d)
+
+
 def cached(
     *,
     max_entries: int = 1000,
@@ -474,9 +513,8 @@ def cached(
     iterable: bool = False,
     prune_unread_entries: bool = True,
     name: Optional[str] = None,
-) -> Callable[[F], CachedFunction[F]]:
-    func = lambda orig: DeferredCacheDescriptor(
-        orig,
+) -> _CachedFunctionDescriptor:
+    return _CachedFunctionDescriptor(
         max_entries=max_entries,
         num_args=num_args,
         uncached_args=uncached_args,
@@ -487,7 +525,26 @@ def cached(
         name=name,
     )
 
-    return cast(Callable[[F], CachedFunction[F]], func)
+
+@attr.s(auto_attribs=True, slots=True, frozen=True)
+class _CachedListFunctionDescriptor:
+    """Helper for `@cachedList`, we name it so that we can hook into it with mypy
+    plugin."""
+
+    cached_method_name: str
+    list_name: str
+    num_args: Optional[int] = None
+    name: Optional[str] = None
+
+    def __call__(self, orig: F) -> CachedFunction[F]:
+        d = DeferredCacheListDescriptor(
+            orig,
+            cached_method_name=self.cached_method_name,
+            list_name=self.list_name,
+            num_args=self.num_args,
+            name=self.name,
+        )
+        return cast(CachedFunction[F], d)
 
 
 def cachedList(
@@ -496,7 +553,7 @@ def cachedList(
     list_name: str,
     num_args: Optional[int] = None,
     name: Optional[str] = None,
-) -> Callable[[F], CachedFunction[F]]:
+) -> _CachedListFunctionDescriptor:
     """Creates a descriptor that wraps a function in a `DeferredCacheListDescriptor`.
 
     Used to do batch lookups for an already created cache. One of the arguments
@@ -525,15 +582,12 @@ def cachedList(
             def batch_do_something(self, first_arg, second_args):
                 ...
     """
-    func = lambda orig: DeferredCacheListDescriptor(
-        orig,
+    return _CachedListFunctionDescriptor(
         cached_method_name=cached_method_name,
         list_name=list_name,
         num_args=num_args,
         name=name,
     )
-
-    return cast(Callable[[F], CachedFunction[F]], func)
 
 
 def _get_cache_key_builder(

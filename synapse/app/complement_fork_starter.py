@@ -1,51 +1,22 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
 #
-# ## What this script does
+# [This file includes modifications made by New Vector Limited]
 #
-# This script spawns multiple workers, whilst only going through the code loading
-# process once. The net effect is that start-up time for a swarm of workers is
-# reduced, particularly in CPU-constrained environments.
-#
-# Before the workers are spawned, the database is prepared in order to avoid the
-# workers racing.
-#
-# ## Stability
-#
-# This script is only intended for use within the Synapse images for the
-# Complement test suite.
-# There are currently no stability guarantees whatsoever; especially not about:
-# - whether it will continue to exist in future versions;
-# - the format of its command-line arguments; or
-# - any details about its behaviour or principles of operation.
-#
-# ## Usage
-#
-# The first argument should be the path to the database configuration, used to
-# set up the database. The rest of the arguments are used as follows:
-# Each worker is specified as an argument group (each argument group is
-# separated by '--').
-# The first argument in each argument group is the Python module name of the application
-# to start. Further arguments are then passed to that module as-is.
-#
-# ## Example
-#
-#   python -m synapse.app.complement_fork_starter path_to_db_config.yaml \
-#     synapse.app.homeserver [args..] -- \
-#     synapse.app.generic_worker [args..] -- \
-#   ...
-#     synapse.app.generic_worker [args..]
 #
 import argparse
 import importlib
@@ -110,6 +81,8 @@ def _worker_entrypoint(
     and then kick off the worker's main() function.
     """
 
+    from synapse.util.stringutils import strtobool
+
     sys.argv = args
 
     # reset the custom signal handlers that we installed, so that the children start
@@ -117,9 +90,24 @@ def _worker_entrypoint(
     for sig, handler in _original_signal_handlers.items():
         signal.signal(sig, handler)
 
-    from twisted.internet.epollreactor import EPollReactor
+    # Install the asyncio reactor if the
+    # SYNAPSE_COMPLEMENT_FORKING_LAUNCHER_ASYNC_IO_REACTOR is set to 1. The
+    # SYNAPSE_ASYNC_IO_REACTOR variable would be used, but then causes
+    # synapse/__init__.py to also try to install an asyncio reactor.
+    if strtobool(
+        os.environ.get("SYNAPSE_COMPLEMENT_FORKING_LAUNCHER_ASYNC_IO_REACTOR", "0")
+    ):
+        import asyncio
 
-    proxy_reactor._install_real_reactor(EPollReactor())
+        from twisted.internet.asyncioreactor import AsyncioSelectorReactor
+
+        reactor = AsyncioSelectorReactor(asyncio.get_event_loop())
+        proxy_reactor._install_real_reactor(reactor)
+    else:
+        from twisted.internet.epollreactor import EPollReactor
+
+        proxy_reactor._install_real_reactor(EPollReactor())
+
     func()
 
 
@@ -202,7 +190,7 @@ def main() -> None:
     # memory space and don't need to repeat the work of loading the code!
     # Instead of using fork() directly, we use the multiprocessing library,
     # which uses fork() on Unix platforms.
-    for (func, worker_args) in zip(worker_functions, args_by_worker):
+    for func, worker_args in zip(worker_functions, args_by_worker):
         process = multiprocessing.Process(
             target=_worker_entrypoint, args=(func, proxy_reactor, worker_args)
         )

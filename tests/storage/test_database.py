@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from typing import Callable, Tuple
 from unittest.mock import Mock, call
@@ -22,6 +29,7 @@ from twisted.test.proto_helpers import MemoryReactor
 from synapse.server import HomeServer
 from synapse.storage.database import (
     DatabasePool,
+    LoggingDatabaseConnection,
     LoggingTransaction,
     make_tuple_comparison_clause,
 )
@@ -35,6 +43,101 @@ class TupleComparisonClauseTestCase(unittest.TestCase):
         clause, args = make_tuple_comparison_clause([("a", 1), ("b", 2)])
         self.assertEqual(clause, "(a,b) > (?,?)")
         self.assertEqual(args, [1, 2])
+
+
+class ExecuteScriptTestCase(unittest.HomeserverTestCase):
+    """Tests for `BaseDatabaseEngine.executescript` implementations."""
+
+    def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
+        self.store = hs.get_datastores().main
+        self.db_pool: DatabasePool = self.store.db_pool
+        self.get_success(
+            self.db_pool.runInteraction(
+                "create",
+                lambda txn: txn.execute("CREATE TABLE foo (name TEXT PRIMARY KEY)"),
+            )
+        )
+
+    def test_transaction(self) -> None:
+        """Test that all statements are run in a single transaction."""
+
+        def run(conn: LoggingDatabaseConnection) -> None:
+            cur = conn.cursor(txn_name="test_transaction")
+            self.db_pool.engine.executescript(
+                cur,
+                ";".join(
+                    [
+                        "INSERT INTO foo (name) VALUES ('transaction test')",
+                        # This next statement will fail. When `executescript` is not
+                        # transactional, the previous row will be observed later.
+                        "INSERT INTO foo (name) VALUES ('transaction test')",
+                    ]
+                ),
+            )
+
+        self.get_failure(
+            self.db_pool.runWithConnection(run),
+            self.db_pool.engine.module.IntegrityError,
+        )
+
+        self.assertIsNone(
+            self.get_success(
+                self.db_pool.simple_select_one_onecol(
+                    "foo",
+                    keyvalues={"name": "transaction test"},
+                    retcol="name",
+                    allow_none=True,
+                )
+            ),
+            "executescript is not running statements inside a transaction",
+        )
+
+    def test_commit(self) -> None:
+        """Test that the script transaction remains open and can be committed."""
+
+        def run(conn: LoggingDatabaseConnection) -> None:
+            cur = conn.cursor(txn_name="test_commit")
+            self.db_pool.engine.executescript(
+                cur, "INSERT INTO foo (name) VALUES ('commit test')"
+            )
+            cur.execute("COMMIT")
+
+        self.get_success(self.db_pool.runWithConnection(run))
+
+        self.assertIsNotNone(
+            self.get_success(
+                self.db_pool.simple_select_one_onecol(
+                    "foo",
+                    keyvalues={"name": "commit test"},
+                    retcol="name",
+                    allow_none=True,
+                )
+            ),
+        )
+
+    def test_rollback(self) -> None:
+        """Test that the script transaction remains open and can be rolled back."""
+
+        def run(conn: LoggingDatabaseConnection) -> None:
+            cur = conn.cursor(txn_name="test_rollback")
+            self.db_pool.engine.executescript(
+                cur, "INSERT INTO foo (name) VALUES ('rollback test')"
+            )
+            cur.execute("ROLLBACK")
+
+        self.get_success(self.db_pool.runWithConnection(run))
+
+        self.assertIsNone(
+            self.get_success(
+                self.db_pool.simple_select_one_onecol(
+                    "foo",
+                    keyvalues={"name": "rollback test"},
+                    retcol="name",
+                    allow_none=True,
+                )
+            ),
+            "executescript is not leaving the script transaction open",
+        )
 
 
 class CallbacksTestCase(unittest.HomeserverTestCase):
@@ -117,7 +220,8 @@ class CallbacksTestCase(unittest.HomeserverTestCase):
         after_callback, exception_callback = self._run_interaction(_test_txn)
 
         # Calling both `after_callback`s when the first attempt failed is rather
-        # surprising (#12184). Let's document the behaviour in a test.
+        # surprising (https://github.com/matrix-org/synapse/issues/12184).
+        # Let's document the behaviour in a test.
         after_callback.assert_has_calls(
             [
                 call(123, 456, extra=789),

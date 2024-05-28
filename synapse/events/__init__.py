@@ -1,18 +1,24 @@
-# Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2019 New Vector Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import abc
 import collections.abc
@@ -25,7 +31,6 @@ from typing import (
     Iterable,
     List,
     Optional,
-    Sequence,
     Tuple,
     Type,
     TypeVar,
@@ -39,7 +44,8 @@ from unpaddedbase64 import encode_base64
 
 from synapse.api.constants import RelationTypes
 from synapse.api.room_versions import EventFormatVersions, RoomVersion, RoomVersions
-from synapse.types import JsonDict, RoomStreamToken
+from synapse.synapse_rust.events import EventInternalMetadata
+from synapse.types import JsonDict, StrCollection
 from synapse.util.caches import intern_dict
 from synapse.util.frozenutils import freeze
 from synapse.util.stringutils import strtobool
@@ -71,7 +77,7 @@ T = TypeVar("T")
 #
 # Note that DictProperty/DefaultDictProperty cannot actually be used with
 # EventBuilder as it lacks a _dict property.
-_DictPropertyInstance = Union["_EventInternalMetadata", "EventBase", "EventBuilder"]
+_DictPropertyInstance = Union["EventBase", "EventBuilder"]
 
 
 class DictProperty(Generic[T]):
@@ -87,16 +93,14 @@ class DictProperty(Generic[T]):
         self,
         instance: Literal[None],
         owner: Optional[Type[_DictPropertyInstance]] = None,
-    ) -> "DictProperty":
-        ...
+    ) -> "DictProperty": ...
 
     @overload
     def __get__(
         self,
         instance: _DictPropertyInstance,
         owner: Optional[Type[_DictPropertyInstance]] = None,
-    ) -> T:
-        ...
+    ) -> T: ...
 
     def __get__(
         self,
@@ -108,7 +112,7 @@ class DictProperty(Generic[T]):
         if instance is None:
             return self
         try:
-            assert isinstance(instance, (EventBase, _EventInternalMetadata))
+            assert isinstance(instance, EventBase)
             return instance._dict[self.key]
         except KeyError as e1:
             # We want this to look like a regular attribute error (mostly so that
@@ -124,11 +128,11 @@ class DictProperty(Generic[T]):
             ) from e1.__context__
 
     def __set__(self, instance: _DictPropertyInstance, v: T) -> None:
-        assert isinstance(instance, (EventBase, _EventInternalMetadata))
+        assert isinstance(instance, EventBase)
         instance._dict[self.key] = v
 
     def __delete__(self, instance: _DictPropertyInstance) -> None:
-        assert isinstance(instance, (EventBase, _EventInternalMetadata))
+        assert isinstance(instance, EventBase)
         try:
             del instance._dict[self.key]
         except KeyError as e1:
@@ -155,16 +159,14 @@ class DefaultDictProperty(DictProperty, Generic[T]):
         self,
         instance: Literal[None],
         owner: Optional[Type[_DictPropertyInstance]] = None,
-    ) -> "DefaultDictProperty":
-        ...
+    ) -> "DefaultDictProperty": ...
 
     @overload
     def __get__(
         self,
         instance: _DictPropertyInstance,
         owner: Optional[Type[_DictPropertyInstance]] = None,
-    ) -> T:
-        ...
+    ) -> T: ...
 
     def __get__(
         self,
@@ -173,125 +175,8 @@ class DefaultDictProperty(DictProperty, Generic[T]):
     ) -> Union[T, "DefaultDictProperty"]:
         if instance is None:
             return self
-        assert isinstance(instance, (EventBase, _EventInternalMetadata))
+        assert isinstance(instance, EventBase)
         return instance._dict.get(self.key, self.default)
-
-
-class _EventInternalMetadata:
-    __slots__ = ["_dict", "stream_ordering", "outlier"]
-
-    def __init__(self, internal_metadata_dict: JsonDict):
-        # we have to copy the dict, because it turns out that the same dict is
-        # reused. TODO: fix that
-        self._dict = dict(internal_metadata_dict)
-
-        # the stream ordering of this event. None, until it has been persisted.
-        self.stream_ordering: Optional[int] = None
-
-        # whether this event is an outlier (ie, whether we have the state at that point
-        # in the DAG)
-        self.outlier = False
-
-    out_of_band_membership: DictProperty[bool] = DictProperty("out_of_band_membership")
-    send_on_behalf_of: DictProperty[str] = DictProperty("send_on_behalf_of")
-    recheck_redaction: DictProperty[bool] = DictProperty("recheck_redaction")
-    soft_failed: DictProperty[bool] = DictProperty("soft_failed")
-    proactively_send: DictProperty[bool] = DictProperty("proactively_send")
-    redacted: DictProperty[bool] = DictProperty("redacted")
-    txn_id: DictProperty[str] = DictProperty("txn_id")
-    token_id: DictProperty[int] = DictProperty("token_id")
-    historical: DictProperty[bool] = DictProperty("historical")
-
-    # XXX: These are set by StreamWorkerStore._set_before_and_after.
-    # I'm pretty sure that these are never persisted to the database, so shouldn't
-    # be here
-    before: DictProperty[RoomStreamToken] = DictProperty("before")
-    after: DictProperty[RoomStreamToken] = DictProperty("after")
-    order: DictProperty[Tuple[int, int]] = DictProperty("order")
-
-    def get_dict(self) -> JsonDict:
-        return dict(self._dict)
-
-    def is_outlier(self) -> bool:
-        return self.outlier
-
-    def is_out_of_band_membership(self) -> bool:
-        """Whether this event is an out-of-band membership.
-
-        OOB memberships are a special case of outlier events: they are membership events
-        for federated rooms that we aren't full members of. Examples include invites
-        received over federation, and rejections for such invites.
-
-        The concept of an OOB membership is needed because these events need to be
-        processed as if they're new regular events (e.g. updating membership state in
-        the database, relaying to clients via /sync, etc) despite being outliers.
-
-        See also https://matrix-org.github.io/synapse/develop/development/room-dag-concepts.html#out-of-band-membership-events.
-
-        (Added in synapse 0.99.0, so may be unreliable for events received before that)
-        """
-        return self._dict.get("out_of_band_membership", False)
-
-    def get_send_on_behalf_of(self) -> Optional[str]:
-        """Whether this server should send the event on behalf of another server.
-        This is used by the federation "send_join" API to forward the initial join
-        event for a server in the room.
-
-        returns a str with the name of the server this event is sent on behalf of.
-        """
-        return self._dict.get("send_on_behalf_of")
-
-    def need_to_check_redaction(self) -> bool:
-        """Whether the redaction event needs to be rechecked when fetching
-        from the database.
-
-        Starting in room v3 redaction events are accepted up front, and later
-        checked to see if the redacter and redactee's domains match.
-
-        If the sender of the redaction event is allowed to redact any event
-        due to auth rules, then this will always return false.
-        """
-        return self._dict.get("recheck_redaction", False)
-
-    def is_soft_failed(self) -> bool:
-        """Whether the event has been soft failed.
-
-        Soft failed events should be handled as usual, except:
-            1. They should not go down sync or event streams, or generally
-               sent to clients.
-            2. They should not be added to the forward extremities (and
-               therefore not to current state).
-        """
-        return self._dict.get("soft_failed", False)
-
-    def should_proactively_send(self) -> bool:
-        """Whether the event, if ours, should be sent to other clients and
-        servers.
-
-        This is used for sending dummy events internally. Servers and clients
-        can still explicitly fetch the event.
-        """
-        return self._dict.get("proactively_send", True)
-
-    def is_redacted(self) -> bool:
-        """Whether the event has been redacted.
-
-        This is used for efficiently checking whether an event has been
-        marked as redacted without needing to make another database call.
-        """
-        return self._dict.get("redacted", False)
-
-    def is_historical(self) -> bool:
-        """Whether this is a historical message.
-        This is used by the batchsend historical message endpoint and
-        is needed to and mark the event as backfilled and skip some checks
-        like push notifications.
-        """
-        return self._dict.get("historical", False)
-
-    def is_notifiable(self) -> bool:
-        """Whether this event can trigger a push notification"""
-        return not self.is_outlier() or self.is_out_of_band_membership()
 
 
 class EventBase(metaclass=abc.ABCMeta):
@@ -319,14 +204,13 @@ class EventBase(metaclass=abc.ABCMeta):
 
         self._dict = event_dict
 
-        self.internal_metadata = _EventInternalMetadata(internal_metadata_dict)
+        self.internal_metadata = EventInternalMetadata(internal_metadata_dict)
 
     depth: DictProperty[int] = DictProperty("depth")
     content: DictProperty[JsonDict] = DictProperty("content")
     hashes: DictProperty[Dict[str, str]] = DictProperty("hashes")
     origin: DictProperty[str] = DictProperty("origin")
     origin_server_ts: DictProperty[int] = DictProperty("origin_server_ts")
-    redacts: DefaultDictProperty[Optional[str]] = DefaultDictProperty("redacts", None)
     room_id: DictProperty[str] = DictProperty("room_id")
     sender: DictProperty[str] = DictProperty("sender")
     # TODO state_key should be Optional[str]. This is generally asserted in Synapse
@@ -345,6 +229,13 @@ class EventBase(metaclass=abc.ABCMeta):
     @property
     def membership(self) -> str:
         return self.content["membership"]
+
+    @property
+    def redacts(self) -> Optional[str]:
+        """MSC2176 moved the redacts field into the content."""
+        if self.room_version.updated_redaction_rules:
+            return self.content.get("redacts")
+        return self.get("redacts")
 
     def is_state(self) -> bool:
         return self.get_state_key() is not None
@@ -404,7 +295,7 @@ class EventBase(metaclass=abc.ABCMeta):
     def keys(self) -> Iterable[str]:
         return self._dict.keys()
 
-    def prev_event_ids(self) -> Sequence[str]:
+    def prev_event_ids(self) -> List[str]:
         """Returns the list of prev event IDs. The order matches the order
         specified in the event, though there is no meaning to it.
 
@@ -413,7 +304,7 @@ class EventBase(metaclass=abc.ABCMeta):
         """
         return [e for e, _ in self._dict["prev_events"]]
 
-    def auth_event_ids(self) -> Sequence[str]:
+    def auth_event_ids(self) -> StrCollection:
         """Returns the list of auth event IDs. The order matches the order
         specified in the event, though there is no meaning to it.
 
@@ -462,7 +353,7 @@ class FrozenEvent(EventBase):
         # Signatures is a dict of dicts, and this is faster than doing a
         # copy.deepcopy
         signatures = {
-            name: {sig_id: sig for sig_id, sig in sigs.items()}
+            name: dict(sigs.items())
             for name, sigs in event_dict.pop("signatures", {}).items()
         }
 
@@ -510,7 +401,7 @@ class FrozenEventV2(EventBase):
         # Signatures is a dict of dicts, and this is faster than doing a
         # copy.deepcopy
         signatures = {
-            name: {sig_id: sig for sig_id, sig in sigs.items()}
+            name: dict(sigs.items())
             for name, sigs in event_dict.pop("signatures", {}).items()
         }
 
@@ -549,7 +440,7 @@ class FrozenEventV2(EventBase):
         self._event_id = "$" + encode_base64(compute_event_reference_hash(self)[1])
         return self._event_id
 
-    def prev_event_ids(self) -> Sequence[str]:
+    def prev_event_ids(self) -> List[str]:
         """Returns the list of prev event IDs. The order matches the order
         specified in the event, though there is no meaning to it.
 
@@ -558,7 +449,7 @@ class FrozenEventV2(EventBase):
         """
         return self._dict["prev_events"]
 
-    def auth_event_ids(self) -> Sequence[str]:
+    def auth_event_ids(self) -> StrCollection:
         """Returns the list of auth event IDs. The order matches the order
         specified in the event, though there is no meaning to it.
 

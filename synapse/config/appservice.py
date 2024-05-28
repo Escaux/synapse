@@ -1,17 +1,24 @@
-# Copyright 2015, 2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import Any, Dict, List
@@ -33,17 +40,30 @@ class AppServiceConfig(Config):
 
     def read_config(self, config: JsonDict, **kwargs: Any) -> None:
         self.app_service_config_files = config.get("app_service_config_files", [])
+        if not isinstance(self.app_service_config_files, list) or not all(
+            isinstance(x, str) for x in self.app_service_config_files
+        ):
+            raise ConfigError(
+                "Expected '%s' to be a list of AS config files:"
+                % (self.app_service_config_files),
+                ("app_service_config_files",),
+            )
+
         self.track_appservice_user_ips = config.get("track_appservice_user_ips", False)
+        self.use_appservice_legacy_authorization = config.get(
+            "use_appservice_legacy_authorization", False
+        )
+        if self.use_appservice_legacy_authorization:
+            logger.warning(
+                "The use of appservice legacy authorization via query params is deprecated"
+                " and should be considered insecure."
+            )
 
 
 def load_appservices(
     hostname: str, config_files: List[str]
 ) -> List[ApplicationService]:
     """Returns a list of Application Services from the config files."""
-    if not isinstance(config_files, list):
-        # type-ignore: this function gets arbitrary json value; we do use this path.
-        logger.warning("Expected %s to be a list of AS config files.", config_files)  # type: ignore[unreachable]
-        return []
 
     # Dicts of value -> filename
     seen_as_tokens: Dict[str, str] = {}

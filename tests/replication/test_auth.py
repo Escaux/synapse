@@ -1,19 +1,30 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 
+from twisted.test.proto_helpers import MemoryReactor
+
 from synapse.rest.client import register
+from synapse.server import HomeServer
+from synapse.util import Clock
 
 from tests.replication._base import BaseMultiWorkerStreamTestCase
 from tests.server import FakeChannel, make_request
@@ -27,7 +38,7 @@ class WorkerAuthenticationTestCase(BaseMultiWorkerStreamTestCase):
 
     servlets = [register.register_servlets]
 
-    def make_homeserver(self, reactor, clock):
+    def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
         config = self.default_config()
         # This isn't a real configuration option but is used to provide the main
         # homeserver and worker homeserver different options.
@@ -39,9 +50,6 @@ class WorkerAuthenticationTestCase(BaseMultiWorkerStreamTestCase):
     def _get_worker_hs_config(self) -> dict:
         config = self.default_config()
         config["worker_app"] = "synapse.app.generic_worker"
-        config["worker_replication_host"] = "testserv"
-        config["worker_replication_http_port"] = "8765"
-
         return config
 
     def _test_register(self) -> FakeChannel:
@@ -77,7 +85,7 @@ class WorkerAuthenticationTestCase(BaseMultiWorkerStreamTestCase):
             {"auth": {"session": session, "type": "m.login.dummy"}},
         )
 
-    def test_no_auth(self):
+    def test_no_auth(self) -> None:
         """With no authentication the request should finish."""
         channel = self._test_register()
         self.assertEqual(channel.code, 200)
@@ -86,7 +94,7 @@ class WorkerAuthenticationTestCase(BaseMultiWorkerStreamTestCase):
         self.assertEqual(channel.json_body["user_id"], "@user:test")
 
     @override_config({"main_replication_secret": "my-secret"})
-    def test_missing_auth(self):
+    def test_missing_auth(self) -> None:
         """If the main process expects a secret that is not provided, an error results."""
         channel = self._test_register()
         self.assertEqual(channel.code, 500)
@@ -97,13 +105,13 @@ class WorkerAuthenticationTestCase(BaseMultiWorkerStreamTestCase):
             "worker_replication_secret": "wrong-secret",
         }
     )
-    def test_unauthorized(self):
+    def test_unauthorized(self) -> None:
         """If the main process receives the wrong secret, an error results."""
         channel = self._test_register()
         self.assertEqual(channel.code, 500)
 
     @override_config({"worker_replication_secret": "my-secret"})
-    def test_authorized(self):
+    def test_authorized(self) -> None:
         """The request should finish when the worker provides the authentication header."""
         channel = self._test_register()
         self.assertEqual(channel.code, 200)

@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 Matrix.org Federation C.I.C
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from unittest import mock
 
@@ -36,7 +43,9 @@ class FederationClientTest(FederatingHomeserverTestCase):
         login.register_servlets,
     ]
 
-    def prepare(self, reactor: MemoryReactor, clock: Clock, homeserver: HomeServer):
+    def prepare(
+        self, reactor: MemoryReactor, clock: Clock, homeserver: HomeServer
+    ) -> None:
         super().prepare(reactor, clock, homeserver)
 
         # mock out the Agent used by the federation client, which is easier than
@@ -51,7 +60,7 @@ class FederationClientTest(FederatingHomeserverTestCase):
         self.creator = f"@creator:{self.OTHER_SERVER_NAME}"
         self.test_room_id = "!room_id"
 
-    def test_get_room_state(self):
+    def test_get_room_state(self) -> None:
         # mock up some events to use in the response.
         # In real life, these would have things in `prev_events` and `auth_events`, but that's
         # a bit annoying to mock up, and the code under test doesn't care, so we don't bother.
@@ -122,7 +131,7 @@ class FederationClientTest(FederatingHomeserverTestCase):
         # check the right call got made to the agent
         self._mock_agent.request.assert_called_once_with(
             b"GET",
-            b"matrix://yet.another.server/_matrix/federation/v1/state/%21room_id?event_id=event_id",
+            b"matrix-federation://yet.another.server/_matrix/federation/v1/state/%21room_id?event_id=event_id",
             headers=mock.ANY,
             bodyProducer=None,
         )
@@ -140,7 +149,7 @@ class FederationClientTest(FederatingHomeserverTestCase):
             ["m.room.create", "m.room.member", "m.room.power_levels"],
         )
 
-    def test_get_pdu_returns_nothing_when_event_does_not_exist(self):
+    def test_get_pdu_returns_nothing_when_event_does_not_exist(self) -> None:
         """No event should be returned when the event does not exist"""
         pulled_pdu_info = self.get_success(
             self.hs.get_federation_client().get_pdu(
@@ -151,11 +160,11 @@ class FederationClientTest(FederatingHomeserverTestCase):
         )
         self.assertEqual(pulled_pdu_info, None)
 
-    def test_get_pdu(self):
+    def test_get_pdu(self) -> None:
         """Test to make sure an event is returned by `get_pdu()`"""
         self._get_pdu_once()
 
-    def test_get_pdu_event_from_cache_is_pristine(self):
+    def test_get_pdu_event_from_cache_is_pristine(self) -> None:
         """Test that modifications made to events returned by `get_pdu()`
         do not propagate back to to the internal cache (events returned should
         be a copy).
@@ -176,7 +185,7 @@ class FederationClientTest(FederatingHomeserverTestCase):
                 RoomVersions.V9,
             )
         )
-        self.assertIsNotNone(pulled_pdu_info2)
+        assert pulled_pdu_info2 is not None
         remote_pdu2 = pulled_pdu_info2.pdu
 
         # Sanity check that we are working against the same event
@@ -224,13 +233,13 @@ class FederationClientTest(FederatingHomeserverTestCase):
                 RoomVersions.V9,
             )
         )
-        self.assertIsNotNone(pulled_pdu_info)
+        assert pulled_pdu_info is not None
         remote_pdu = pulled_pdu_info.pdu
 
         # check the right call got made to the agent
         self._mock_agent.request.assert_called_once_with(
             b"GET",
-            b"matrix://yet.another.server/_matrix/federation/v1/event/event_id",
+            b"matrix-federation://yet.another.server/_matrix/federation/v1/event/event_id",
             headers=mock.ANY,
             bodyProducer=None,
         )

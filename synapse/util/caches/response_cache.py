@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from typing import (
     TYPE_CHECKING,
@@ -36,7 +43,7 @@ from synapse.logging.opentracing import (
 )
 from synapse.util import Clock
 from synapse.util.async_helpers import AbstractObservableDeferred, ObservableDeferred
-from synapse.util.caches import register_cache
+from synapse.util.caches import EvictionReason, register_cache
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +174,7 @@ class ResponseCache(Generic[KV]):
             # the should_cache bit, we leave it in the cache for now and schedule
             # its removal later.
             if self.timeout_sec and context.should_cache:
-                self.clock.call_later(self.timeout_sec, self.unset, key)
+                self.clock.call_later(self.timeout_sec, self._entry_timeout, key)
             else:
                 # otherwise, remove the result immediately.
                 self.unset(key)
@@ -185,6 +192,12 @@ class ResponseCache(Generic[KV]):
         Args:
             key: key used to remove the cached value
         """
+        self._metrics.inc_evictions(EvictionReason.invalidation)
+        self._result_cache.pop(key, None)
+
+    def _entry_timeout(self, key: KV) -> None:
+        """For the call_later to remove from the cache"""
+        self._metrics.inc_evictions(EvictionReason.time)
         self._result_cache.pop(key, None)
 
     async def wrap(

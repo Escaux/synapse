@@ -1,17 +1,26 @@
-# Copyright 2014-2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
+from typing import List, Optional, Tuple, cast
+
 from twisted.test.proto_helpers import MemoryReactor
 
 from synapse.api.constants import Membership
@@ -27,7 +36,6 @@ from tests.test_utils import event_injection
 
 
 class RoomMemberStoreTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         login.register_servlets,
         register_servlets_for_client_rest_resource,
@@ -35,7 +43,6 @@ class RoomMemberStoreTestCase(unittest.HomeserverTestCase):
     ]
 
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: TestHomeServer) -> None:  # type: ignore[override]
-
         # We can't test the RoomMemberStore on its own without the other event
         # storage logic
         self.store = hs.get_datastores().main
@@ -48,7 +55,6 @@ class RoomMemberStoreTestCase(unittest.HomeserverTestCase):
         self.u_charlie = UserID.from_string("@charlie:elsewhere")
 
     def test_one_member(self) -> None:
-
         # Alice creates the room, and is automatically joined
         self.room = self.helper.create_room_as(self.u_alice, tok=self.t_alice)
 
@@ -113,21 +119,24 @@ class RoomMemberStoreTestCase(unittest.HomeserverTestCase):
     def test__null_byte_in_display_name_properly_handled(self) -> None:
         room = self.helper.create_room_as(self.u_alice, tok=self.t_alice)
 
-        res = self.get_success(
-            self.store.db_pool.simple_select_list(
-                "room_memberships",
-                {"user_id": "@alice:test"},
-                ["display_name", "event_id"],
-            )
+        res = cast(
+            List[Tuple[Optional[str], str]],
+            self.get_success(
+                self.store.db_pool.simple_select_list(
+                    "room_memberships",
+                    {"user_id": "@alice:test"},
+                    ["display_name", "event_id"],
+                )
+            ),
         )
         # Check that we only got one result back
         self.assertEqual(len(res), 1)
 
         # Check that alice's display name is "alice"
-        self.assertEqual(res[0]["display_name"], "alice")
+        self.assertEqual(res[0][0], "alice")
 
         # Grab the event_id to use later
-        event_id = res[0]["event_id"]
+        event_id = res[0][1]
 
         # Create a profile with the offending null byte in the display name
         new_profile = {"displayname": "ali\u0000ce"}
@@ -142,21 +151,24 @@ class RoomMemberStoreTestCase(unittest.HomeserverTestCase):
             tok=self.t_alice,
         )
 
-        res2 = self.get_success(
-            self.store.db_pool.simple_select_list(
-                "room_memberships",
-                {"user_id": "@alice:test"},
-                ["display_name", "event_id"],
-            )
+        res2 = cast(
+            List[Tuple[Optional[str], str]],
+            self.get_success(
+                self.store.db_pool.simple_select_list(
+                    "room_memberships",
+                    {"user_id": "@alice:test"},
+                    ["display_name", "event_id"],
+                )
+            ),
         )
         # Check that we only have two results
         self.assertEqual(len(res2), 2)
 
         # Filter out the previous event using the event_id we grabbed above
-        row = [row for row in res2 if row["event_id"] != event_id]
+        row = [row for row in res2 if row[1] != event_id]
 
         # Check that alice's display name is now None
-        self.assertEqual(row[0]["display_name"], None)
+        self.assertIsNone(row[0][0])
 
     def test_room_is_locally_forgotten(self) -> None:
         """Test that when the last local user has forgotten a room it is known as forgotten."""

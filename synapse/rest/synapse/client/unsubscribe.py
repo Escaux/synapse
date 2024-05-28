@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from typing import TYPE_CHECKING
 
@@ -38,6 +45,10 @@ class UnsubscribeResource(DirectServeHtmlResource):
         self.macaroon_generator = hs.get_macaroon_generator()
 
     async def _async_render_GET(self, request: SynapseRequest) -> None:
+        """
+        Handle a user opening an unsubscribe link in the browser, either via an
+        HTML/Text email or via the List-Unsubscribe header.
+        """
         token = parse_string(request, "access_token", required=True)
         app_id = parse_string(request, "app_id", required=True)
         pushkey = parse_string(request, "pushkey", required=True)
@@ -62,3 +73,16 @@ class UnsubscribeResource(DirectServeHtmlResource):
             200,
             UnsubscribeResource.SUCCESS_HTML,
         )
+
+    async def _async_render_POST(self, request: SynapseRequest) -> None:
+        """
+        Handle a mail user agent POSTing to the unsubscribe URL via the
+        List-Unsubscribe & List-Unsubscribe-Post headers.
+        """
+
+        # TODO Assert that the body has a single field
+
+        # Assert the body has form encoded key/value pair of
+        # List-Unsubscribe=One-Click.
+
+        await self._async_render_GET(request)

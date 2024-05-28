@@ -1,17 +1,24 @@
-# Copyright 2014-2021 The Matrix.org Foundation C.I.C.
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 Sorunome
+# Copyright 2014-2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Type
 
@@ -25,6 +32,7 @@ from synapse.federation.transport.server._base import (
 from synapse.federation.transport.server.federation import (
     FEDERATION_SERVLET_CLASSES,
     FederationAccountStatusServlet,
+    FederationUnstableClientKeysClaimServlet,
 )
 from synapse.http.server import HttpServer, JsonResource
 from synapse.http.servlet import (
@@ -108,6 +116,7 @@ class PublicRoomList(BaseFederationServlet):
     """
 
     PATH = "/publicRooms"
+    CATEGORY = "Federation requests"
 
     def __init__(
         self,
@@ -147,7 +156,10 @@ class PublicRoomList(BaseFederationServlet):
             limit = None
 
         data = await self.handler.get_local_public_room_list(
-            limit, since_token, network_tuple=network_tuple, from_federation=True
+            limit,
+            since_token,
+            network_tuple=network_tuple,
+            from_federation_origin=origin,
         )
         return 200, data
 
@@ -188,7 +200,7 @@ class PublicRoomList(BaseFederationServlet):
             since_token=since_token,
             search_filter=search_filter,
             network_tuple=network_tuple,
-            from_federation=True,
+            from_federation_origin=origin,
         )
 
         return 200, data
@@ -212,6 +224,7 @@ class OpenIdUserInfo(BaseFederationServlet):
     """
 
     PATH = "/openid/userinfo"
+    CATEGORY = "Federation requests"
 
     REQUIRE_AUTH = False
 
@@ -294,6 +307,11 @@ def register_servlets(
             if (
                 servletclass == FederationAccountStatusServlet
                 and not hs.config.experimental.msc3720_enabled
+            ):
+                continue
+            if (
+                servletclass == FederationUnstableClientKeysClaimServlet
+                and not hs.config.experimental.msc3983_appservice_otk_claims
             ):
                 continue
 

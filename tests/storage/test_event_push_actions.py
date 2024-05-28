@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2016-2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from typing import Optional, Tuple
 
@@ -154,7 +161,7 @@ class EventPushActionsStoreTestCase(HomeserverTestCase):
         # Create a user to receive notifications and send receipts.
         user_id, token, _, other_token, room_id = self._create_users_and_room()
 
-        last_event_id: str
+        last_event_id = ""
 
         def _assert_counts(notif_count: int, highlight_count: int) -> None:
             counts = self.get_success(
@@ -289,7 +296,7 @@ class EventPushActionsStoreTestCase(HomeserverTestCase):
         user_id, token, _, other_token, room_id = self._create_users_and_room()
         thread_id: str
 
-        last_event_id: str
+        last_event_id = ""
 
         def _assert_counts(
             notif_count: int,
@@ -471,7 +478,7 @@ class EventPushActionsStoreTestCase(HomeserverTestCase):
         user_id, token, _, other_token, room_id = self._create_users_and_room()
         thread_id: str
 
-        last_event_id: str
+        last_event_id = ""
 
         def _assert_counts(
             notif_count: int,
@@ -774,7 +781,7 @@ class EventPushActionsStoreTestCase(HomeserverTestCase):
         self.assertEqual(r, 3)
 
         # add a bunch of dummy events to the events table
-        for (stream_ordering, ts) in (
+        for stream_ordering, ts in (
             (3, 110),
             (4, 120),
             (5, 120),

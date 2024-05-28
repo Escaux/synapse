@@ -1,21 +1,28 @@
-# Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2017-2018 New Vector Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import datetime
 import os
 from typing import Any, Dict, List, Tuple
+from unittest.mock import AsyncMock
 
 import pkg_resources
 
@@ -36,11 +43,11 @@ from synapse.types import JsonDict
 from synapse.util import Clock
 
 from tests import unittest
+from tests.server import ThreadedMemoryReactorClock
 from tests.unittest import override_config
 
 
 class RegisterRestServletTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         login.register_servlets,
         register.register_servlets,
@@ -52,6 +59,13 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
         config = super().default_config()
         config["allow_guest_access"] = True
         return config
+
+    def make_homeserver(
+        self, reactor: ThreadedMemoryReactorClock, clock: Clock
+    ) -> HomeServer:
+        hs = super().make_homeserver(reactor, clock)
+        hs.get_send_email_handler()._sendmail = AsyncMock()
+        return hs
 
     def test_POST_appservice_registration_valid(self) -> None:
         user_id = "@as_user_kermit:test"
@@ -76,7 +90,7 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
 
         self.assertEqual(channel.code, 200, msg=channel.result)
         det_data = {"user_id": user_id, "home_server": self.hs.hostname}
-        self.assertDictContainsSubset(det_data, channel.json_body)
+        self.assertLessEqual(det_data.items(), channel.json_body.items())
 
     def test_POST_appservice_registration_no_type(self) -> None:
         as_token = "i_am_an_app_service"
@@ -137,7 +151,7 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
             "device_id": device_id,
         }
         self.assertEqual(channel.code, 200, msg=channel.result)
-        self.assertDictContainsSubset(det_data, channel.json_body)
+        self.assertLessEqual(det_data.items(), channel.json_body.items())
 
     @override_config({"enable_registration": False})
     def test_POST_disabled_registration(self) -> None:
@@ -151,14 +165,14 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
         self.assertEqual(channel.json_body["errcode"], "M_FORBIDDEN")
 
     def test_POST_guest_registration(self) -> None:
-        self.hs.config.key.macaroon_secret_key = "test"
+        self.hs.config.key.macaroon_secret_key = b"test"
         self.hs.config.registration.allow_guest_access = True
 
         channel = self.make_request(b"POST", self.url + b"?kind=guest", b"{}")
 
         det_data = {"home_server": self.hs.hostname, "device_id": "guest_device"}
         self.assertEqual(channel.code, 200, msg=channel.result)
-        self.assertDictContainsSubset(det_data, channel.json_body)
+        self.assertLessEqual(det_data.items(), channel.json_body.items())
 
     def test_POST_disabled_guest_registration(self) -> None:
         self.hs.config.registration.allow_guest_access = False
@@ -170,7 +184,7 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
 
     @override_config({"rc_registration": {"per_second": 0.17, "burst_count": 5}})
     def test_POST_ratelimiting_guest(self) -> None:
-        for i in range(0, 6):
+        for i in range(6):
             url = self.url + b"?kind=guest"
             channel = self.make_request(b"POST", url, b"{}")
 
@@ -188,7 +202,7 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
 
     @override_config({"rc_registration": {"per_second": 0.17, "burst_count": 5}})
     def test_POST_ratelimiting(self) -> None:
-        for i in range(0, 6):
+        for i in range(6):
             request_data = {
                 "username": "kermit" + str(i),
                 "password": "monkey",
@@ -268,18 +282,18 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
             "device_id": device_id,
         }
         self.assertEqual(channel.code, 200, msg=channel.result)
-        self.assertDictContainsSubset(det_data, channel.json_body)
+        self.assertLessEqual(det_data.items(), channel.json_body.items())
 
         # Check the `completed` counter has been incremented and pending is 0
-        res = self.get_success(
+        pending, completed = self.get_success(
             store.db_pool.simple_select_one(
                 "registration_tokens",
                 keyvalues={"token": token},
                 retcols=["pending", "completed"],
             )
         )
-        self.assertEqual(res["completed"], 1)
-        self.assertEqual(res["pending"], 0)
+        self.assertEqual(completed, 1)
+        self.assertEqual(pending, 0)
 
     @override_config({"registration_requires_token": True})
     def test_POST_registration_token_invalid(self) -> None:
@@ -373,15 +387,15 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
         params1["auth"]["type"] = LoginType.DUMMY
         self.make_request(b"POST", self.url, params1)
         # Check pending=0 and completed=1
-        res = self.get_success(
+        pending, completed = self.get_success(
             store.db_pool.simple_select_one(
                 "registration_tokens",
                 keyvalues={"token": token},
                 retcols=["pending", "completed"],
             )
         )
-        self.assertEqual(res["pending"], 0)
-        self.assertEqual(res["completed"], 1)
+        self.assertEqual(pending, 0)
+        self.assertEqual(completed, 1)
 
         # Check auth still fails when using token with session2
         channel = self.make_request(b"POST", self.url, params2)
@@ -797,7 +811,6 @@ class RegisterRestServletTestCase(unittest.HomeserverTestCase):
 
 
 class AccountValidityTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         register.register_servlets,
         synapse.rest.admin.register_servlets_for_client_rest_resource,
@@ -913,7 +926,6 @@ class AccountValidityTestCase(unittest.HomeserverTestCase):
 
 
 class AccountValidityRenewalByEmailTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         register.register_servlets,
         synapse.rest.admin.register_servlets_for_client_rest_resource,
@@ -1132,7 +1144,6 @@ class AccountValidityRenewalByEmailTestCase(unittest.HomeserverTestCase):
 
 
 class AccountValidityBackgroundJobTestCase(unittest.HomeserverTestCase):
-
     servlets = [synapse.rest.admin.register_servlets_for_client_rest_resource]
 
     def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
@@ -1166,12 +1177,15 @@ class AccountValidityBackgroundJobTestCase(unittest.HomeserverTestCase):
         """
         user_id = self.register_user("kermit_delta", "user")
 
-        self.hs.config.account_validity.startup_job_max_delta = self.max_delta
+        self.hs.config.account_validity.account_validity_startup_job_max_delta = (
+            self.max_delta
+        )
 
         now_ms = self.hs.get_clock().time_msec()
         self.get_success(self.store._set_expiration_date_when_missing())
 
         res = self.get_success(self.store.get_expiration_ts_for_user(user_id))
+        assert res is not None
 
         self.assertGreaterEqual(res, now_ms + self.validity_period - self.max_delta)
         self.assertLessEqual(res, now_ms + self.validity_period)
@@ -1224,7 +1238,7 @@ class RegistrationTokenValidityRestServletTestCase(unittest.HomeserverTestCase):
     def test_GET_ratelimiting(self) -> None:
         token = "1234"
 
-        for i in range(0, 6):
+        for i in range(6):
             channel = self.make_request(
                 b"GET",
                 f"{self.url}?token={token}",

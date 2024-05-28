@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014, 2015 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 import os
@@ -116,7 +123,6 @@ class ContentRepositoryConfig(Config):
     section = "media"
 
     def read_config(self, config: JsonDict, **kwargs: Any) -> None:
-
         # Only enable the media repo if either the media repo is enabled or the
         # current worker app is the media repo.
         if (
@@ -137,6 +143,16 @@ class ContentRepositoryConfig(Config):
         self.max_upload_size = self.parse_size(config.get("max_upload_size", "50M"))
         self.max_image_pixels = self.parse_size(config.get("max_image_pixels", "32M"))
         self.max_spider_size = self.parse_size(config.get("max_spider_size", "10M"))
+
+        self.prevent_media_downloads_from = config.get(
+            "prevent_media_downloads_from", []
+        )
+
+        self.unused_expiration_time = self.parse_duration(
+            config.get("unused_expiration_time", "24h")
+        )
+
+        self.max_pending_media_uploads = config.get("max_pending_media_uploads", 5)
 
         self.media_store_path = self.ensure_directory(
             config.get("media_store_path", "media_store")
@@ -179,10 +195,12 @@ class ContentRepositoryConfig(Config):
         for i, provider_config in enumerate(storage_providers):
             # We special case the module "file_system" so as not to need to
             # expose FileStorageProviderBackend
-            if provider_config["module"] == "file_system":
+            if (
+                provider_config["module"] == "file_system"
+                or provider_config["module"] == "synapse.rest.media.v1.storage_provider"
+            ):
                 provider_config["module"] = (
-                    "synapse.rest.media.v1.storage_provider"
-                    ".FileStorageProviderBackend"
+                    "synapse.media.storage_provider.FileStorageProviderBackend"
                 )
 
             provider_class, parsed_config = load_module(
@@ -219,20 +237,20 @@ class ContentRepositoryConfig(Config):
                 if "http" in proxy_env or "https" in proxy_env:
                     logger.warning("".join(HTTP_PROXY_SET_WARNING))
 
-            # we always blacklist '0.0.0.0' and '::', which are supposed to be
+            # we always block '0.0.0.0' and '::', which are supposed to be
             # unroutable addresses.
-            self.url_preview_ip_range_blacklist = generate_ip_set(
+            self.url_preview_ip_range_blocklist = generate_ip_set(
                 config["url_preview_ip_range_blacklist"],
                 ["0.0.0.0", "::"],
                 config_path=("url_preview_ip_range_blacklist",),
             )
 
-            self.url_preview_ip_range_whitelist = generate_ip_set(
+            self.url_preview_ip_range_allowlist = generate_ip_set(
                 config.get("url_preview_ip_range_whitelist", ()),
                 config_path=("url_preview_ip_range_whitelist",),
             )
 
-            self.url_preview_url_blacklist = config.get("url_preview_url_blacklist", ())
+            self.url_preview_url_blocklist = config.get("url_preview_url_blacklist", ())
 
             self.url_preview_accept_language = config.get(
                 "url_preview_accept_language"

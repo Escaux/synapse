@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 
 from typing import List, Tuple
@@ -376,3 +383,34 @@ class MemoryEvictionTestCase(unittest.HomeserverTestCase):
         # the items should still be in the cache
         self.assertEqual(cache.get("key1"), 1)
         self.assertEqual(cache.get("key2"), 2)
+
+
+class ExtraIndexLruCacheTestCase(unittest.HomeserverTestCase):
+    def test_invalidate_simple(self) -> None:
+        cache: LruCache[str, int] = LruCache(10, extra_index_cb=lambda k, v: str(v))
+        cache["key1"] = 1
+        cache["key2"] = 2
+
+        cache.invalidate_on_extra_index("key1")
+        self.assertEqual(cache.get("key1"), 1)
+        self.assertEqual(cache.get("key2"), 2)
+
+        cache.invalidate_on_extra_index("1")
+        self.assertEqual(cache.get("key1"), None)
+        self.assertEqual(cache.get("key2"), 2)
+
+    def test_invalidate_multi(self) -> None:
+        cache: LruCache[str, int] = LruCache(10, extra_index_cb=lambda k, v: str(v))
+        cache["key1"] = 1
+        cache["key2"] = 1
+        cache["key3"] = 2
+
+        cache.invalidate_on_extra_index("key1")
+        self.assertEqual(cache.get("key1"), 1)
+        self.assertEqual(cache.get("key2"), 1)
+        self.assertEqual(cache.get("key3"), 2)
+
+        cache.invalidate_on_extra_index("1")
+        self.assertEqual(cache.get("key1"), None)
+        self.assertEqual(cache.get("key2"), None)
+        self.assertEqual(cache.get("key3"), 2)

@@ -1,24 +1,36 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """ This module contains REST servlets to do with profile: /profile/<paths> """
+
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Tuple
 
 from synapse.api.errors import Codes, SynapseError
 from synapse.http.server import HttpServer
-from synapse.http.servlet import RestServlet, parse_json_object_from_request
+from synapse.http.servlet import (
+    RestServlet,
+    parse_boolean,
+    parse_json_object_from_request,
+)
 from synapse.http.site import SynapseRequest
 from synapse.rest.client._base import client_patterns
 from synapse.types import JsonDict, UserID
@@ -27,8 +39,23 @@ if TYPE_CHECKING:
     from synapse.server import HomeServer
 
 
+def _read_propagate(hs: "HomeServer", request: SynapseRequest) -> bool:
+    # This will always be set by the time Twisted calls us.
+    assert request.args is not None
+
+    propagate = True
+    if hs.config.experimental.msc4069_profile_inhibit_propagation:
+        do_propagate = request.args.get(b"org.matrix.msc4069.propagate")
+        if do_propagate is not None:
+            propagate = parse_boolean(
+                request, "org.matrix.msc4069.propagate", default=False
+            )
+    return propagate
+
+
 class ProfileDisplaynameRestServlet(RestServlet):
     PATTERNS = client_patterns("/profile/(?P<user_id>[^/]*)/displayname", v1=True)
+    CATEGORY = "Event sending requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -79,13 +106,18 @@ class ProfileDisplaynameRestServlet(RestServlet):
                 errcode=Codes.BAD_JSON,
             )
 
-        await self.profile_handler.set_displayname(user, requester, new_name, is_admin)
+        propagate = _read_propagate(self.hs, request)
+
+        await self.profile_handler.set_displayname(
+            user, requester, new_name, is_admin, propagate=propagate
+        )
 
         return 200, {}
 
 
 class ProfileAvatarURLRestServlet(RestServlet):
     PATTERNS = client_patterns("/profile/(?P<user_id>[^/]*)/avatar_url", v1=True)
+    CATEGORY = "Event sending requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -133,8 +165,10 @@ class ProfileAvatarURLRestServlet(RestServlet):
                 400, "Missing key 'avatar_url'", errcode=Codes.MISSING_PARAM
             )
 
+        propagate = _read_propagate(self.hs, request)
+
         await self.profile_handler.set_avatar_url(
-            user, requester, new_avatar_url, is_admin
+            user, requester, new_avatar_url, is_admin, propagate=propagate
         )
 
         return 200, {}
@@ -142,6 +176,7 @@ class ProfileAvatarURLRestServlet(RestServlet):
 
 class ProfileRestServlet(RestServlet):
     PATTERNS = client_patterns("/profile/(?P<user_id>[^/]*)", v1=True)
+    CATEGORY = "Event sending requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()

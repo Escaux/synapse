@@ -1,24 +1,35 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
+from typing import Dict, Iterable, List, Tuple, cast
 
 from synapse.config.appservice import load_appservices
+from synapse.config.homeserver import HomeServerConfig
+from synapse.storage.database import LoggingTransaction
+from synapse.storage.engines import BaseDatabaseEngine
 
 logger = logging.getLogger(__name__)
 
 
-def run_create(cur, database_engine, *args, **kwargs):
+def run_create(cur: LoggingTransaction, database_engine: BaseDatabaseEngine) -> None:
     # NULL indicates user was not registered by an appservice.
     try:
         cur.execute("ALTER TABLE users ADD COLUMN appservice_id TEXT")
@@ -27,9 +38,13 @@ def run_create(cur, database_engine, *args, **kwargs):
         pass
 
 
-def run_upgrade(cur, database_engine, config, *args, **kwargs):
+def run_upgrade(
+    cur: LoggingTransaction,
+    database_engine: BaseDatabaseEngine,
+    config: HomeServerConfig,
+) -> None:
     cur.execute("SELECT name FROM users")
-    rows = cur.fetchall()
+    rows = cast(Iterable[Tuple[str]], cur.fetchall())
 
     config_files = []
     try:
@@ -39,7 +54,7 @@ def run_upgrade(cur, database_engine, config, *args, **kwargs):
 
     appservices = load_appservices(config.server.server_name, config_files)
 
-    owned = {}
+    owned: Dict[str, List[str]] = {}
 
     for row in rows:
         user_id = row[0]

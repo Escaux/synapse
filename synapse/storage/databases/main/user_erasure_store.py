@@ -1,18 +1,24 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
-from typing import Dict, Iterable
+from typing import Iterable, List, Mapping, Tuple, cast
 
 from synapse.storage.database import LoggingTransaction
 from synapse.storage.databases.main import CacheInvalidationWorkerStore
@@ -40,7 +46,7 @@ class UserErasureWorkerStore(CacheInvalidationWorkerStore):
         return bool(result)
 
     @cachedList(cached_method_name="is_user_erased", list_name="user_ids")
-    async def are_users_erased(self, user_ids: Iterable[str]) -> Dict[str, bool]:
+    async def are_users_erased(self, user_ids: Iterable[str]) -> Mapping[str, bool]:
         """
         Checks which users in a list have requested erasure
 
@@ -50,14 +56,17 @@ class UserErasureWorkerStore(CacheInvalidationWorkerStore):
         Returns:
             for each user, whether the user has requested erasure.
         """
-        rows = await self.db_pool.simple_select_many_batch(
-            table="erased_users",
-            column="user_id",
-            iterable=user_ids,
-            retcols=("user_id",),
-            desc="are_users_erased",
+        rows = cast(
+            List[Tuple[str]],
+            await self.db_pool.simple_select_many_batch(
+                table="erased_users",
+                column="user_id",
+                iterable=user_ids,
+                retcols=("user_id",),
+                desc="are_users_erased",
+            ),
         )
-        erased_users = {row["user_id"] for row in rows}
+        erased_users = {row[0] for row in rows}
 
         return {u: u in erased_users for u in user_ids}
 

@@ -1,17 +1,24 @@
-# Copyright 2015, 2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from typing import Any
 
 from synapse.types import JsonDict
@@ -29,7 +36,14 @@ class AuthConfig(Config):
         if password_config is None:
             password_config = {}
 
-        passwords_enabled = password_config.get("enabled", True)
+        # The default value of password_config.enabled is True, unless msc3861 is enabled.
+        msc3861_enabled = (
+            (config.get("experimental_features") or {})
+            .get("msc3861", {})
+            .get("enabled", False)
+        )
+        passwords_enabled = password_config.get("enabled", not msc3861_enabled)
+
         # 'only_for_reauth' allows users who have previously set a password to use it,
         # even though passwords would otherwise be disabled.
         passwords_for_reauth_only = passwords_enabled == "only_for_reauth"
@@ -52,4 +66,14 @@ class AuthConfig(Config):
         ui_auth = config.get("ui_auth") or {}
         self.ui_auth_session_timeout = self.parse_duration(
             ui_auth.get("session_timeout", 0)
+        )
+
+        # Logging in with an existing session.
+        login_via_existing = config.get("login_via_existing_session", {})
+        self.login_via_existing_enabled = login_via_existing.get("enabled", False)
+        self.login_via_existing_require_ui_auth = login_via_existing.get(
+            "require_ui_auth", True
+        )
+        self.login_via_existing_token_timeout = self.parse_duration(
+            login_via_existing.get("token_timeout", "5m")
         )

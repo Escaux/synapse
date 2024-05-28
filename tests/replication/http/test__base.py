@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from http import HTTPStatus
 from typing import Tuple
@@ -44,7 +51,7 @@ class CancellableReplicationEndpoint(ReplicationEndpoint):
 
     @cancellable
     async def _handle_request(  # type: ignore[override]
-        self, request: Request
+        self, request: Request, content: JsonDict
     ) -> Tuple[int, JsonDict]:
         await self.clock.sleep(1.0)
         return HTTPStatus.OK, {"result": True}
@@ -54,6 +61,7 @@ class UncancellableReplicationEndpoint(ReplicationEndpoint):
     NAME = "uncancellable_sleep"
     PATH_ARGS = ()
     CACHE = False
+    WAIT_FOR_STREAMS = False
 
     def __init__(self, hs: HomeServer):
         super().__init__(hs)
@@ -64,7 +72,7 @@ class UncancellableReplicationEndpoint(ReplicationEndpoint):
         return {}
 
     async def _handle_request(  # type: ignore[override]
-        self, request: Request
+        self, request: Request, content: JsonDict
     ) -> Tuple[int, JsonDict]:
         await self.clock.sleep(1.0)
         return HTTPStatus.OK, {"result": True}
@@ -73,7 +81,7 @@ class UncancellableReplicationEndpoint(ReplicationEndpoint):
 class ReplicationEndpointCancellationTestCase(unittest.HomeserverTestCase):
     """Tests for `ReplicationEndpoint` cancellation."""
 
-    def create_test_resource(self):
+    def create_test_resource(self) -> JsonResource:
         """Overrides `HomeserverTestCase.create_test_resource`."""
         resource = JsonResource(self.hs)
 
@@ -85,7 +93,7 @@ class ReplicationEndpointCancellationTestCase(unittest.HomeserverTestCase):
     def test_cancellable_disconnect(self) -> None:
         """Test that handlers with the `@cancellable` flag can be cancelled."""
         path = f"{REPLICATION_PREFIX}/{CancellableReplicationEndpoint.NAME}/"
-        channel = self.make_request("POST", path, await_result=False)
+        channel = self.make_request("POST", path, await_result=False, content={})
         test_disconnect(
             self.reactor,
             channel,
@@ -96,7 +104,7 @@ class ReplicationEndpointCancellationTestCase(unittest.HomeserverTestCase):
     def test_uncancellable_disconnect(self) -> None:
         """Test that handlers without the `@cancellable` flag cannot be cancelled."""
         path = f"{REPLICATION_PREFIX}/{UncancellableReplicationEndpoint.NAME}/"
-        channel = self.make_request("POST", path, await_result=False)
+        channel = self.make_request("POST", path, await_result=False, content={})
         test_disconnect(
             self.reactor,
             channel,

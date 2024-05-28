@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 import random
 from types import TracebackType
@@ -19,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Optional, Type
 from synapse.api.errors import CodeMessageException
 from synapse.metrics.background_process_metrics import run_as_background_process
 from synapse.storage import DataStore
+from synapse.types import StrCollection
 from synapse.util import Clock
 
 if TYPE_CHECKING:
@@ -26,15 +34,6 @@ if TYPE_CHECKING:
     from synapse.replication.tcp.handler import ReplicationCommandHandler
 
 logger = logging.getLogger(__name__)
-
-# the initial backoff, after the first transaction fails
-MIN_RETRY_INTERVAL = 10 * 60 * 1000
-
-# how much we multiply the backoff by after each subsequent fail
-RETRY_MULTIPLIER = 5
-
-# a cap on the backoff. (Essentially none)
-MAX_RETRY_INTERVAL = 2**62
 
 
 class NotRetryingDestination(Exception):
@@ -125,6 +124,30 @@ async def get_retry_limiter(
     )
 
 
+async def filter_destinations_by_retry_limiter(
+    destinations: StrCollection,
+    clock: Clock,
+    store: DataStore,
+    retry_due_within_ms: int = 0,
+) -> StrCollection:
+    """Filter down the list of destinations to only those that will are either
+    alive or due for a retry (within `retry_due_within_ms`)
+    """
+    if not destinations:
+        return destinations
+
+    retry_timings = await store.get_destination_retry_timings_batch(destinations)
+
+    now = int(clock.time_msec())
+
+    return [
+        destination
+        for destination, timings in retry_timings.items()
+        if timings is None
+        or timings.retry_last_ts + timings.retry_interval <= now + retry_due_within_ms
+    ]
+
+
 class RetryDestinationLimiter:
     def __init__(
         self,
@@ -137,6 +160,7 @@ class RetryDestinationLimiter:
         backoff_on_failure: bool = True,
         notifier: Optional["Notifier"] = None,
         replication_client: Optional["ReplicationCommandHandler"] = None,
+        backoff_on_all_error_codes: bool = False,
     ):
         """Marks the destination as "down" if an exception is thrown in the
         context, except for CodeMessageException with code < 500.
@@ -153,9 +177,12 @@ class RetryDestinationLimiter:
                 database in milliseconds, or zero if the last request was
                 successful.
             backoff_on_404: Back off if we get a 404
-
             backoff_on_failure: set to False if we should not increase the
                 retry interval on a failure.
+            notifier: A notifier used to mark servers as up.
+            replication_client A replication client used to mark servers as up.
+            backoff_on_all_error_codes: Whether we should back off on any
+                error code.
         """
         self.clock = clock
         self.store = store
@@ -165,9 +192,20 @@ class RetryDestinationLimiter:
         self.retry_interval = retry_interval
         self.backoff_on_404 = backoff_on_404
         self.backoff_on_failure = backoff_on_failure
+        self.backoff_on_all_error_codes = backoff_on_all_error_codes
 
         self.notifier = notifier
         self.replication_client = replication_client
+
+        self.destination_min_retry_interval_ms = (
+            self.store.hs.config.federation.destination_min_retry_interval_ms
+        )
+        self.destination_retry_multiplier = (
+            self.store.hs.config.federation.destination_retry_multiplier
+        )
+        self.destination_max_retry_interval_ms = (
+            self.store.hs.config.federation.destination_max_retry_interval_ms
+        )
 
     def __enter__(self) -> None:
         pass
@@ -178,6 +216,7 @@ class RetryDestinationLimiter:
         exc_val: Optional[BaseException],
         exc_tb: Optional[TracebackType],
     ) -> None:
+        success = exc_type is None
         valid_err_code = False
         if exc_type is None:
             valid_err_code = True
@@ -194,7 +233,9 @@ class RetryDestinationLimiter:
             # won't accept our requests for at least a while.
             # 429 is us being aggressively rate limited, so lets rate limit
             # ourselves.
-            if exc_val.code == 404 and self.backoff_on_404:
+            if self.backoff_on_all_error_codes:
+                valid_err_code = False
+            elif exc_val.code == 404 and self.backoff_on_404:
                 valid_err_code = False
             elif exc_val.code in (401, 429):
                 valid_err_code = False
@@ -203,7 +244,10 @@ class RetryDestinationLimiter:
             else:
                 valid_err_code = False
 
-        if valid_err_code:
+        # Whether previous requests to the destination had been failing.
+        previously_failing = bool(self.failure_ts)
+
+        if success:
             # We connected successfully.
             if not self.retry_interval:
                 return
@@ -214,19 +258,27 @@ class RetryDestinationLimiter:
             self.failure_ts = None
             retry_last_ts = 0
             self.retry_interval = 0
+        elif valid_err_code:
+            # We got a potentially valid error code back. We don't reset the
+            # timers though, as the other side might actually be down anyway
+            # (e.g. some deprovisioned servers will always return a 404 or 403,
+            # and we don't want to keep resetting the retry timers for them).
+            return
         elif not self.backoff_on_failure:
             return
         else:
             # We couldn't connect.
             if self.retry_interval:
                 self.retry_interval = int(
-                    self.retry_interval * RETRY_MULTIPLIER * random.uniform(0.8, 1.4)
+                    self.retry_interval
+                    * self.destination_retry_multiplier
+                    * random.uniform(0.8, 1.4)
                 )
 
-                if self.retry_interval >= MAX_RETRY_INTERVAL:
-                    self.retry_interval = MAX_RETRY_INTERVAL
+                if self.retry_interval >= self.destination_max_retry_interval_ms:
+                    self.retry_interval = self.destination_max_retry_interval_ms
             else:
-                self.retry_interval = MIN_RETRY_INTERVAL
+                self.retry_interval = self.destination_min_retry_interval_ms
 
             logger.info(
                 "Connection to %s was unsuccessful (%s(%s)); backoff now %i",
@@ -240,6 +292,9 @@ class RetryDestinationLimiter:
             if self.failure_ts is None:
                 self.failure_ts = retry_last_ts
 
+        # Whether the current request to the destination had been failing.
+        currently_failing = bool(self.failure_ts)
+
         async def store_retry_timings() -> None:
             try:
                 await self.store.set_destination_retry_timings(
@@ -249,17 +304,15 @@ class RetryDestinationLimiter:
                     self.retry_interval,
                 )
 
-                if self.notifier:
-                    # Inform the relevant places that the remote server is back up.
-                    self.notifier.notify_remote_server_up(self.destination)
+                # If the server was previously failing, but is no longer.
+                if previously_failing and not currently_failing:
+                    if self.notifier:
+                        # Inform the relevant places that the remote server is back up.
+                        self.notifier.notify_remote_server_up(self.destination)
 
-                if self.replication_client:
-                    # If we're on a worker we try and inform master about this. The
-                    # replication client doesn't hook into the notifier to avoid
-                    # infinite loops where we send a `REMOTE_SERVER_UP` command to
-                    # master, which then echoes it back to us which in turn pokes
-                    # the notifier.
-                    self.replication_client.send_remote_server_up(self.destination)
+                    if self.replication_client:
+                        # Inform other workers that the remote server is up.
+                        self.replication_client.send_remote_server_up(self.destination)
 
             except Exception:
                 logger.exception("Failed to store destination_retry_timings")

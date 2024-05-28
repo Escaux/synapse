@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from typing import List, Tuple
 from unittest.case import SkipTest
@@ -64,17 +71,16 @@ class EventSearchInsertionTest(HomeserverTestCase):
             store.search_msgs([room_id], "hi bob", ["content.body"])
         )
         self.assertEqual(result.get("count"), 1)
-        if isinstance(store.database_engine, PostgresEngine):
-            self.assertIn("hi", result.get("highlights"))
-            self.assertIn("bob", result.get("highlights"))
+        self.assertIn("hi", result.get("highlights"))
+        self.assertIn("bob", result.get("highlights"))
 
         # Check that search works for an unrelated message
         result = self.get_success(
             store.search_msgs([room_id], "another", ["content.body"])
         )
         self.assertEqual(result.get("count"), 1)
-        if isinstance(store.database_engine, PostgresEngine):
-            self.assertIn("another", result.get("highlights"))
+
+        self.assertIn("another", result.get("highlights"))
 
         # Check that search works for a search term that overlaps with the message
         # containing a null byte and an unrelated message.
@@ -83,8 +89,8 @@ class EventSearchInsertionTest(HomeserverTestCase):
         result = self.get_success(
             store.search_msgs([room_id], "hi alice", ["content.body"])
         )
-        if isinstance(store.database_engine, PostgresEngine):
-            self.assertIn("alice", result.get("highlights"))
+
+        self.assertIn("alice", result.get("highlights"))
 
     def test_non_string(self) -> None:
         """Test that non-string `value`s are not inserted into `event_search`.
@@ -93,7 +99,7 @@ class EventSearchInsertionTest(HomeserverTestCase):
         both strings and integers. When using Postgres, integers are automatically
         converted to strings.
 
-        Regression test for #11918.
+        Regression test for https://github.com/matrix-org/synapse/issues/11918.
         """
         store = self.hs.get_datastores().main
 
@@ -119,7 +125,6 @@ class EventSearchInsertionTest(HomeserverTestCase):
             "content": {"msgtype": "m.text", "body": 2},
             "room_id": room_id,
             "sender": user_id,
-            "depth": prev_event.depth + 1,
             "prev_events": prev_event_ids,
             "origin_server_ts": self.clock.time_msec(),
         }
@@ -134,7 +139,7 @@ class EventSearchInsertionTest(HomeserverTestCase):
                     prev_state_map,
                     for_verification=False,
                 ),
-                depth=event_dict["depth"],
+                depth=prev_event.depth + 1,
             )
         )
 
@@ -319,14 +324,16 @@ class MessageSearchTest(HomeserverTestCase):
             result = self.get_success(
                 store.search_msgs([self.room_id], query, ["content.body"])
             )
-            self.assertEquals(
+            self.assertEqual(
                 result["count"],
                 1 if expect_to_contain else 0,
-                f"expected '{query}' to match '{self.PHRASE}'"
-                if expect_to_contain
-                else f"'{query}' unexpectedly matched '{self.PHRASE}'",
+                (
+                    f"expected '{query}' to match '{self.PHRASE}'"
+                    if expect_to_contain
+                    else f"'{query}' unexpectedly matched '{self.PHRASE}'"
+                ),
             )
-            self.assertEquals(
+            self.assertEqual(
                 len(result["results"]),
                 1 if expect_to_contain else 0,
                 "results array length should match count",
@@ -337,14 +344,16 @@ class MessageSearchTest(HomeserverTestCase):
             result = self.get_success(
                 store.search_rooms([self.room_id], query, ["content.body"], 10)
             )
-            self.assertEquals(
+            self.assertEqual(
                 result["count"],
                 1 if expect_to_contain else 0,
-                f"expected '{query}' to match '{self.PHRASE}'"
-                if expect_to_contain
-                else f"'{query}' unexpectedly matched '{self.PHRASE}'",
+                (
+                    f"expected '{query}' to match '{self.PHRASE}'"
+                    if expect_to_contain
+                    else f"'{query}' unexpectedly matched '{self.PHRASE}'"
+                ),
             )
-            self.assertEquals(
+            self.assertEqual(
                 len(result["results"]),
                 1 if expect_to_contain else 0,
                 "results array length should match count",

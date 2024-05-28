@@ -1,24 +1,31 @@
-# Copyright 2019 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 import re
 from typing import TYPE_CHECKING, Optional, Tuple
 
+from synapse.api.constants import Direction
 from synapse.handlers.relations import ThreadsListInclude
 from synapse.http.server import HttpServer
-from synapse.http.servlet import RestServlet, parse_integer, parse_string
+from synapse.http.servlet import RestServlet, parse_boolean, parse_integer, parse_string
 from synapse.http.site import SynapseRequest
 from synapse.rest.client._base import client_patterns
 from synapse.storage.databases.main.relations import ThreadsNextBatch
@@ -41,6 +48,7 @@ class RelationPaginationServlet(RestServlet):
         "(/(?P<relation_type>[^/]*)(/(?P<event_type>[^/]*))?)?$",
         releases=("v1",),
     )
+    CATEGORY = "Client API requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -59,7 +67,10 @@ class RelationPaginationServlet(RestServlet):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
 
         pagination_config = await PaginationConfig.from_request(
-            self._store, request, default_limit=5, default_dir="b"
+            self._store, request, default_limit=5, default_dir=Direction.BACKWARDS
+        )
+        recurse = parse_boolean(request, "recurse", default=False) or parse_boolean(
+            request, "org.matrix.msc3981.recurse", default=False
         )
 
         # The unstable version of this API returns an extra field for client
@@ -73,6 +84,7 @@ class RelationPaginationServlet(RestServlet):
             event_id=parent_id,
             room_id=room_id,
             pagin_config=pagination_config,
+            recurse=recurse,
             include_original_event=include_original_event,
             relation_type=relation_type,
             event_type=event_type,
@@ -83,6 +95,7 @@ class RelationPaginationServlet(RestServlet):
 
 class ThreadsServlet(RestServlet):
     PATTERNS = (re.compile("^/_matrix/client/v1/rooms/(?P<room_id>[^/]*)/threads"),)
+    CATEGORY = "Client API requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()

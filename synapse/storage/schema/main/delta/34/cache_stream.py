@@ -1,26 +1,34 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 
-from synapse.storage.engines import PostgresEngine
+from synapse.storage.database import LoggingTransaction
+from synapse.storage.engines import BaseDatabaseEngine, PostgresEngine
 from synapse.storage.prepare_database import get_statements
 
 logger = logging.getLogger(__name__)
 
 
-# This stream is used to notify replication slaves that some caches have
+# This stream is used to notify workers over replication that some caches have
 # been invalidated that they cannot infer from the other streams.
 CREATE_TABLE = """
 CREATE TABLE cache_invalidation_stream (
@@ -34,13 +42,9 @@ CREATE INDEX cache_invalidation_stream_id ON cache_invalidation_stream(stream_id
 """
 
 
-def run_create(cur, database_engine, *args, **kwargs):
+def run_create(cur: LoggingTransaction, database_engine: BaseDatabaseEngine) -> None:
     if not isinstance(database_engine, PostgresEngine):
         return
 
     for statement in get_statements(CREATE_TABLE.splitlines()):
         cur.execute(statement)
-
-
-def run_upgrade(cur, database_engine, *args, **kwargs):
-    pass

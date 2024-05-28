@@ -1,22 +1,29 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import itertools
 import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
-from synapse.api.constants import EduTypes, Membership, PresenceState
+from synapse.api.constants import AccountDataTypes, EduTypes, Membership, PresenceState
 from synapse.api.errors import Codes, StoreError, SynapseError
 from synapse.api.filtering import FilterCollection
 from synapse.api.presence import UserPresenceState
@@ -38,7 +45,7 @@ from synapse.http.server import HttpServer
 from synapse.http.servlet import RestServlet, parse_boolean, parse_integer, parse_string
 from synapse.http.site import SynapseRequest
 from synapse.logging.opentracing import trace_with_opname
-from synapse.types import JsonDict, StreamToken
+from synapse.types import JsonDict, Requester, StreamToken
 from synapse.util import json_decoder
 
 from ._base import client_patterns, set_timeline_upper_limit
@@ -87,6 +94,7 @@ class SyncRestServlet(RestServlet):
 
     PATTERNS = client_patterns("/sync$")
     ALLOWED_PRESENCE = {"online", "offline", "unavailable"}
+    CATEGORY = "Sync requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -139,7 +147,28 @@ class SyncRestServlet(RestServlet):
             device_id,
         )
 
-        request_key = (user, timeout, since, filter_id, full_state, device_id)
+        # Stream position of the last ignored users account data event for this user,
+        # if we're initial syncing.
+        # We include this in the request key to invalidate an initial sync
+        # in the response cache once the set of ignored users has changed.
+        # (We filter out ignored users from timeline events, so our sync response
+        # is invalid once the set of ignored users changes.)
+        last_ignore_accdata_streampos: Optional[int] = None
+        if not since:
+            # No `since`, so this is an initial sync.
+            last_ignore_accdata_streampos = await self.store.get_latest_stream_id_for_global_account_data_by_type_for_user(
+                user.to_string(), AccountDataTypes.IGNORED_USER_LIST
+            )
+
+        request_key = (
+            user,
+            timeout,
+            since,
+            filter_id,
+            full_state,
+            device_id,
+            last_ignore_accdata_streampos,
+        )
 
         if filter_id is None:
             filter_collection = self.filtering.DEFAULT_FILTER_COLLECTION
@@ -156,7 +185,7 @@ class SyncRestServlet(RestServlet):
         else:
             try:
                 filter_collection = await self.filtering.get_user_filter(
-                    user.localpart, filter_id
+                    user, filter_id
                 )
             except StoreError as err:
                 if err.code != 404:
@@ -183,6 +212,7 @@ class SyncRestServlet(RestServlet):
 
         context = await self.presence_handler.user_syncing(
             user.to_string(),
+            requester.device_id,
             affect_presence=affect_presence,
             presence_state=set_presence,
         )
@@ -205,7 +235,7 @@ class SyncRestServlet(RestServlet):
         # We know that the the requester has an access token since appservices
         # cannot use sync.
         response_content = await self.encode_response(
-            time_now, sync_result, requester.access_token_id, filter_collection
+            time_now, sync_result, requester, filter_collection
         )
 
         logger.debug("Event formatting complete")
@@ -216,7 +246,7 @@ class SyncRestServlet(RestServlet):
         self,
         time_now: int,
         sync_result: SyncResult,
-        access_token_id: Optional[int],
+        requester: Requester,
         filter: FilterCollection,
     ) -> JsonDict:
         logger.debug("Formatting events in sync response")
@@ -229,12 +259,12 @@ class SyncRestServlet(RestServlet):
 
         serialize_options = SerializeEventConfig(
             event_format=event_formatter,
-            token_id=access_token_id,
+            requester=requester,
             only_event_fields=filter.event_fields,
         )
         stripped_serialize_options = SerializeEventConfig(
             event_format=event_formatter,
-            token_id=access_token_id,
+            requester=requester,
             include_stripped_room_state=True,
         )
 
@@ -283,12 +313,12 @@ class SyncRestServlet(RestServlet):
 
         # https://github.com/matrix-org/matrix-doc/blob/54255851f642f84a4f1aaf7bc063eebe3d76752b/proposals/2732-olm-fallback-keys.md
         # states that this field should always be included, as long as the server supports the feature.
-        response[
-            "org.matrix.msc2732.device_unused_fallback_key_types"
-        ] = sync_result.device_unused_fallback_key_types
-        response[
-            "device_unused_fallback_key_types"
-        ] = sync_result.device_unused_fallback_key_types
+        response["org.matrix.msc2732.device_unused_fallback_key_types"] = (
+            sync_result.device_unused_fallback_key_types
+        )
+        response["device_unused_fallback_key_types"] = (
+            sync_result.device_unused_fallback_key_types
+        )
 
         if joined:
             response["rooms"][Membership.JOIN] = joined
@@ -361,7 +391,7 @@ class SyncRestServlet(RestServlet):
         """
         invited = {}
         for room in rooms:
-            invite = self._event_serializer.serialize_event(
+            invite = await self._event_serializer.serialize_event(
                 room.invite, time_now, config=serialize_options
             )
             unsigned = dict(invite.get("unsigned", {}))
@@ -392,7 +422,7 @@ class SyncRestServlet(RestServlet):
         """
         knocked = {}
         for room in rooms:
-            knock = self._event_serializer.serialize_event(
+            knock = await self._event_serializer.serialize_event(
                 room.knock, time_now, config=serialize_options
             )
 
@@ -483,10 +513,10 @@ class SyncRestServlet(RestServlet):
                     event.room_id,
                 )
 
-        serialized_state = self._event_serializer.serialize_events(
+        serialized_state = await self._event_serializer.serialize_events(
             state_events, time_now, config=serialize_options
         )
-        serialized_timeline = self._event_serializer.serialize_events(
+        serialized_timeline = await self._event_serializer.serialize_events(
             timeline_events,
             time_now,
             config=serialize_options,
@@ -513,9 +543,9 @@ class SyncRestServlet(RestServlet):
             if room.unread_thread_notifications:
                 result["unread_thread_notifications"] = room.unread_thread_notifications
                 if self._msc3773_enabled:
-                    result[
-                        "org.matrix.msc3773.unread_thread_notifications"
-                    ] = room.unread_thread_notifications
+                    result["org.matrix.msc3773.unread_thread_notifications"] = (
+                        room.unread_thread_notifications
+                    )
             result["summary"] = room.summary
             if self._msc2654_enabled:
                 result["org.matrix.msc2654.unread_count"] = room.unread_count

@@ -1,17 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2019 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 import os
@@ -44,7 +50,7 @@ from synapse.app._base import (
 )
 from synapse.config._base import ConfigError, format_config_error
 from synapse.config.homeserver import HomeServerConfig
-from synapse.config.server import ListenerConfig
+from synapse.config.server import ListenerConfig, TCPListenerConfig
 from synapse.federation.transport.server import TransportLayerServer
 from synapse.http.additional_resource import AdditionalResource
 from synapse.http.server import (
@@ -78,14 +84,13 @@ class SynapseHomeServer(HomeServer):
     DATASTORE_CLASS = DataStore  # type: ignore
 
     def _listener_http(
-        self, config: HomeServerConfig, listener_config: ListenerConfig
+        self,
+        config: HomeServerConfig,
+        listener_config: ListenerConfig,
     ) -> Iterable[Port]:
-        port = listener_config.port
         # Must exist since this is an HTTP listener.
         assert listener_config.http_options is not None
-        site_tag = listener_config.http_options.tag
-        if site_tag is None:
-            site_tag = str(port)
+        site_tag = listener_config.get_site_tag()
 
         # We always include a health resource.
         resources: Dict[str, Resource] = {"/health": HealthResource()}
@@ -95,6 +100,9 @@ class SynapseHomeServer(HomeServer):
                 if name == "openid" and "federation" in res.names:
                     # Skip loading openid resource if federation is defined
                     # since federation resource will include openid
+                    continue
+                if name == "health":
+                    # Skip loading, health resource is always included
                     continue
                 resources.update(self._configure_named_resource(name, res.compress))
 
@@ -137,6 +145,7 @@ class SynapseHomeServer(HomeServer):
             root_resource = OptionsResource()
 
         ports = listen_http(
+            self,
             listener_config,
             create_resource_tree(resources, root_resource),
             self.version_string,
@@ -179,9 +188,9 @@ class SynapseHomeServer(HomeServer):
                     PasswordResetSubmitTokenResource,
                 )
 
-                resources[
-                    "/_synapse/client/password_reset/email/submit_token"
-                ] = PasswordResetSubmitTokenResource(self)
+                resources["/_synapse/client/password_reset/email/submit_token"] = (
+                    PasswordResetSubmitTokenResource(self)
+                )
 
         if name == "consent":
             from synapse.rest.consent.consent_resource import ConsentResource
@@ -249,12 +258,17 @@ class SynapseHomeServer(HomeServer):
                     self._listener_http(self.config, listener)
                 )
             elif listener.type == "manhole":
-                _base.listen_manhole(
-                    listener.bind_addresses,
-                    listener.port,
-                    manhole_settings=self.config.server.manhole_settings,
-                    manhole_globals={"hs": self},
-                )
+                if isinstance(listener, TCPListenerConfig):
+                    _base.listen_manhole(
+                        listener.bind_addresses,
+                        listener.port,
+                        manhole_settings=self.config.server.manhole_settings,
+                        manhole_globals={"hs": self},
+                    )
+                else:
+                    raise ConfigError(
+                        "Can not use a unix socket for manhole at this time."
+                    )
             elif listener.type == "metrics":
                 if not self.config.metrics.enable_metrics:
                     logger.warning(
@@ -262,10 +276,16 @@ class SynapseHomeServer(HomeServer):
                         "enable_metrics is not True!"
                     )
                 else:
-                    _base.listen_metrics(
-                        listener.bind_addresses,
-                        listener.port,
-                    )
+                    if isinstance(listener, TCPListenerConfig):
+                        _base.listen_metrics(
+                            listener.bind_addresses,
+                            listener.port,
+                        )
+                    else:
+                        raise ConfigError(
+                            "Can not use a unix socket for metrics at this time."
+                        )
+
             else:
                 # this shouldn't happen, as the listener type should have been checked
                 # during parsing
@@ -318,7 +338,6 @@ def setup(config_options: List[str]) -> SynapseHomeServer:
             and not config.registration.registrations_require_3pid
             and not config.registration.registration_requires_token
         ):
-
             raise ConfigError(
                 "You have enabled open registration without any verification. This is a known vector for "
                 "spam and abuse. If you would like to allow public registration, please consider adding email, "

@@ -1,29 +1,44 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014 - 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import importlib.util
 import logging
 import os
 import re
 from collections import Counter
-from typing import Collection, Generator, Iterable, List, Optional, TextIO, Tuple
+from typing import (
+    Collection,
+    Counter as CounterType,
+    Generator,
+    Iterable,
+    List,
+    Optional,
+    TextIO,
+    Tuple,
+)
 
 import attr
-from typing_extensions import Counter as CounterType
 
 from synapse.config.homeserver import HomeServerConfig
-from synapse.storage.database import LoggingDatabaseConnection
-from synapse.storage.engines import BaseDatabaseEngine, PostgresEngine
+from synapse.storage.database import LoggingDatabaseConnection, LoggingTransaction
+from synapse.storage.engines import BaseDatabaseEngine, PostgresEngine, Sqlite3Engine
 from synapse.storage.schema import SCHEMA_COMPAT_VERSION, SCHEMA_VERSION
 from synapse.storage.types import Cursor
 
@@ -108,9 +123,14 @@ def prepare_database(
         # so we start one before running anything. This ensures that any upgrades
         # are either applied completely, or not at all.
         #
-        # (psycopg2 automatically starts a transaction as soon as we run any statements
-        # at all, so this is redundant but harmless there.)
-        cur.execute("BEGIN TRANSACTION")
+        # psycopg2 does not automatically start transactions when in autocommit mode.
+        # While it is technically harmless to nest transactions in postgres, doing so
+        # results in a warning in Postgres' logs per query. And we'd rather like to
+        # avoid doing that.
+        if isinstance(database_engine, Sqlite3Engine) or (
+            isinstance(database_engine, PostgresEngine) and db_conn.autocommit
+        ):
+            cur.execute("BEGIN TRANSACTION")
 
         logger.info("%r: Checking existing schema version", databases)
         version_info = _get_or_create_schema_state(cur, database_engine)
@@ -163,7 +183,9 @@ def prepare_database(
 
 
 def _setup_new_database(
-    cur: Cursor, database_engine: BaseDatabaseEngine, databases: Collection[str]
+    cur: LoggingTransaction,
+    database_engine: BaseDatabaseEngine,
+    databases: Collection[str],
 ) -> None:
     """Sets up the physical database by finding a base set of "full schemas" and
     then applying any necessary deltas, including schemas from the given data
@@ -284,7 +306,7 @@ def _setup_new_database(
 
 
 def _upgrade_existing_database(
-    cur: Cursor,
+    cur: LoggingTransaction,
     current_schema_state: _SchemaState,
     database_engine: BaseDatabaseEngine,
     config: Optional[HomeServerConfig],
@@ -558,7 +580,7 @@ def _apply_module_schemas(
     """
     # This is the old way for password_auth_provider modules to make changes
     # to the database. This should instead be done using the module API
-    for (mod, _config) in config.authproviders.password_providers:
+    for mod, _config in config.authproviders.password_providers:
         if not hasattr(mod, "get_db_schema_files"):
             continue
         modname = ".".join((mod.__module__, mod.__name__))
@@ -586,7 +608,7 @@ def _apply_module_schema_files(
         (modname,),
     )
     applied_deltas = {d for d, in cur}
-    for (name, stream) in names_and_streams:
+    for name, stream in names_and_streams:
         if name in applied_deltas:
             continue
 

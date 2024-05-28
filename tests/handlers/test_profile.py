@@ -1,18 +1,25 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from typing import Any, Awaitable, Callable, Dict
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from parameterized import parameterized
 
@@ -26,7 +33,6 @@ from synapse.types import JsonDict, UserID
 from synapse.util import Clock
 
 from tests import unittest
-from tests.test_utils import make_awaitable
 
 
 class ProfileTestCase(unittest.HomeserverTestCase):
@@ -35,7 +41,7 @@ class ProfileTestCase(unittest.HomeserverTestCase):
     servlets = [admin.register_servlets]
 
     def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
-        self.mock_federation = Mock()
+        self.mock_federation = AsyncMock()
         self.mock_registry = Mock()
 
         self.query_handlers: Dict[str, Callable[[dict], Awaitable[JsonDict]]] = {}
@@ -66,9 +72,7 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         self.handler = hs.get_profile_handler()
 
     def test_get_my_name(self) -> None:
-        self.get_success(
-            self.store.set_profile_displayname(self.frank.localpart, "Frank")
-        )
+        self.get_success(self.store.set_profile_displayname(self.frank, "Frank"))
 
         displayname = self.get_success(self.handler.get_displayname(self.frank))
 
@@ -82,11 +86,7 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
 
         self.assertEqual(
-            (
-                self.get_success(
-                    self.store.get_profile_displayname(self.frank.localpart)
-                )
-            ),
+            (self.get_success(self.store.get_profile_displayname(self.frank))),
             "Frank Jr.",
         )
 
@@ -98,11 +98,7 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
 
         self.assertEqual(
-            (
-                self.get_success(
-                    self.store.get_profile_displayname(self.frank.localpart)
-                )
-            ),
+            (self.get_success(self.store.get_profile_displayname(self.frank))),
             "Frank",
         )
 
@@ -114,23 +110,17 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
 
         self.assertIsNone(
-            self.get_success(self.store.get_profile_displayname(self.frank.localpart))
+            self.get_success(self.store.get_profile_displayname(self.frank))
         )
 
     def test_set_my_name_if_disabled(self) -> None:
         self.hs.config.registration.enable_set_displayname = False
 
         # Setting displayname for the first time is allowed
-        self.get_success(
-            self.store.set_profile_displayname(self.frank.localpart, "Frank")
-        )
+        self.get_success(self.store.set_profile_displayname(self.frank, "Frank"))
 
         self.assertEqual(
-            (
-                self.get_success(
-                    self.store.get_profile_displayname(self.frank.localpart)
-                )
-            ),
+            (self.get_success(self.store.get_profile_displayname(self.frank))),
             "Frank",
         )
 
@@ -151,9 +141,7 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
 
     def test_get_other_name(self) -> None:
-        self.mock_federation.make_query.return_value = make_awaitable(
-            {"displayname": "Alice"}
-        )
+        self.mock_federation.make_query.return_value = {"displayname": "Alice"}
 
         displayname = self.get_success(self.handler.get_displayname(self.alice))
 
@@ -166,8 +154,14 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
 
     def test_incoming_fed_query(self) -> None:
-        self.get_success(self.store.create_profile("caroline"))
-        self.get_success(self.store.set_profile_displayname("caroline", "Caroline"))
+        self.get_success(
+            self.store.create_profile(UserID.from_string("@caroline:test"))
+        )
+        self.get_success(
+            self.store.set_profile_displayname(
+                UserID.from_string("@caroline:test"), "Caroline"
+            )
+        )
 
         response = self.get_success(
             self.query_handlers["profile"](
@@ -183,13 +177,21 @@ class ProfileTestCase(unittest.HomeserverTestCase):
 
     def test_get_my_avatar(self) -> None:
         self.get_success(
-            self.store.set_profile_avatar_url(
-                self.frank.localpart, "http://my.server/me.png"
-            )
+            self.store.set_profile_avatar_url(self.frank, "http://my.server/me.png")
         )
         avatar_url = self.get_success(self.handler.get_avatar_url(self.frank))
 
         self.assertEqual("http://my.server/me.png", avatar_url)
+
+    def test_get_profile_empty_displayname(self) -> None:
+        self.get_success(self.store.set_profile_displayname(self.frank, None))
+        self.get_success(
+            self.store.set_profile_avatar_url(self.frank, "http://my.server/me.png")
+        )
+
+        profile = self.get_success(self.handler.get_profile(self.frank.to_string()))
+
+        self.assertEqual("http://my.server/me.png", profile["avatar_url"])
 
     def test_set_my_avatar(self) -> None:
         self.get_success(
@@ -201,7 +203,7 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
 
         self.assertEqual(
-            (self.get_success(self.store.get_profile_avatar_url(self.frank.localpart))),
+            (self.get_success(self.store.get_profile_avatar_url(self.frank))),
             "http://my.server/pic.gif",
         )
 
@@ -215,7 +217,7 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
 
         self.assertEqual(
-            (self.get_success(self.store.get_profile_avatar_url(self.frank.localpart))),
+            (self.get_success(self.store.get_profile_avatar_url(self.frank))),
             "http://my.server/me.png",
         )
 
@@ -229,7 +231,7 @@ class ProfileTestCase(unittest.HomeserverTestCase):
         )
 
         self.assertIsNone(
-            (self.get_success(self.store.get_profile_avatar_url(self.frank.localpart))),
+            (self.get_success(self.store.get_profile_avatar_url(self.frank))),
         )
 
     def test_set_my_avatar_if_disabled(self) -> None:
@@ -237,13 +239,11 @@ class ProfileTestCase(unittest.HomeserverTestCase):
 
         # Setting displayname for the first time is allowed
         self.get_success(
-            self.store.set_profile_avatar_url(
-                self.frank.localpart, "http://my.server/me.png"
-            )
+            self.store.set_profile_avatar_url(self.frank, "http://my.server/me.png")
         )
 
         self.assertEqual(
-            (self.get_success(self.store.get_profile_avatar_url(self.frank.localpart))),
+            (self.get_success(self.store.get_profile_avatar_url(self.frank))),
             "http://my.server/me.png",
         )
 

@@ -82,7 +82,7 @@ def generate_config_from_template(
                 with open(filename) as handle:
                     value = handle.read()
             else:
-                log("Generating a random secret for {}".format(secret))
+                log(f"Generating a random secret for {secret}")
                 value = codecs.encode(os.urandom(32), "hex").decode()
                 with open(filename, "w") as handle:
                     handle.write(value)
@@ -160,11 +160,6 @@ def run_generate_config(environ: Mapping[str, str], ownership: Optional[str]) ->
     config_path = environ.get("SYNAPSE_CONFIG_PATH", config_dir + "/homeserver.yaml")
     data_dir = environ.get("SYNAPSE_DATA_DIR", "/data")
 
-    if ownership is not None:
-        # make sure that synapse has perms to write to the data dir.
-        log(f"Setting ownership on {data_dir} to {ownership}")
-        subprocess.run(["chown", ownership, data_dir], check=True)
-
     # create a suitable log config from our template
     log_config_file = "%s/%s.log.config" % (config_dir, server_name)
     if not os.path.exists(log_config_file):
@@ -189,9 +184,15 @@ def run_generate_config(environ: Mapping[str, str], ownership: Optional[str]) ->
         "--generate-config",
         "--open-private-ports",
     ]
+
+    if ownership is not None:
+        # make sure that synapse has perms to write to the data dir.
+        log(f"Setting ownership on {data_dir} to {ownership}")
+        subprocess.run(["chown", ownership, data_dir], check=True)
+        args = ["gosu", ownership] + args
+
     # log("running %s" % (args, ))
-    flush_buffers()
-    os.execv(sys.executable, args)
+    subprocess.run(args, check=True)
 
 
 def main(args: List[str], environ: MutableMapping[str, str]) -> None:
@@ -239,7 +240,7 @@ def main(args: List[str], environ: MutableMapping[str, str]) -> None:
         log("Could not find %s, will not use" % (jemallocpath,))
 
     # if there are no config files passed to synapse, try adding the default file
-    if not any(p.startswith("--config-path") or p.startswith("-c") for p in args):
+    if not any(p.startswith(("--config-path", "-c")) for p in args):
         config_dir = environ.get("SYNAPSE_CONFIG_DIR", "/data")
         config_path = environ.get(
             "SYNAPSE_CONFIG_PATH", config_dir + "/homeserver.yaml"

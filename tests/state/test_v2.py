@@ -1,16 +1,22 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import itertools
 from typing import (
@@ -719,7 +725,10 @@ class AuthChainDifferenceTestCase(unittest.TestCase):
         persisted_events = {a.event_id: a, b.event_id: b}
         unpersited_events = {c.event_id: c}
 
-        state_sets = [{"a": a.event_id, "b": b.event_id}, {"c": c.event_id}]
+        state_sets = [
+            {("a", ""): a.event_id, ("b", ""): b.event_id},
+            {("c", ""): c.event_id},
+        ]
 
         store = TestStateResolutionStore(persisted_events)
 
@@ -774,8 +783,8 @@ class AuthChainDifferenceTestCase(unittest.TestCase):
         unpersited_events = {c.event_id: c, d.event_id: d}
 
         state_sets = [
-            {"a": a.event_id, "b": b.event_id},
-            {"c": c.event_id, "d": d.event_id},
+            {("a", ""): a.event_id, ("b", ""): b.event_id},
+            {("c", ""): c.event_id, ("d", ""): d.event_id},
         ]
 
         store = TestStateResolutionStore(persisted_events)
@@ -841,8 +850,8 @@ class AuthChainDifferenceTestCase(unittest.TestCase):
         unpersited_events = {c.event_id: c, d.event_id: d, e.event_id: e}
 
         state_sets = [
-            {"a": a.event_id, "b": b.event_id, "e": e.event_id},
-            {"c": c.event_id, "d": d.event_id},
+            {("a", ""): a.event_id, ("b", ""): b.event_id, ("e", ""): e.event_id},
+            {("c", ""): c.event_id, ("d", ""): d.event_id},
         ]
 
         store = TestStateResolutionStore(persisted_events)

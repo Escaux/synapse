@@ -1,20 +1,27 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import json
 from http import HTTPStatus
 from io import BytesIO
-from typing import Tuple
+from typing import Tuple, Union
 from unittest.mock import Mock
 
 from synapse.api.errors import Codes, SynapseError
@@ -33,7 +40,7 @@ from tests import unittest
 from tests.http.server._base import test_disconnect
 
 
-def make_request(content):
+def make_request(content: Union[bytes, JsonDict]) -> Mock:
     """Make an object that acts enough like a request."""
     request = Mock(spec=["method", "uri", "content"])
 
@@ -47,7 +54,7 @@ def make_request(content):
 
 
 class TestServletUtils(unittest.TestCase):
-    def test_parse_json_value(self):
+    def test_parse_json_value(self) -> None:
         """Basic tests for parse_json_value_from_request."""
         # Test round-tripping.
         obj = {"foo": 1}
@@ -78,7 +85,7 @@ class TestServletUtils(unittest.TestCase):
         with self.assertRaises(SynapseError):
             parse_json_value_from_request(make_request(b'{"foo": Infinity}'))
 
-    def test_parse_json_object(self):
+    def test_parse_json_object(self) -> None:
         """Basic tests for parse_json_object_from_request."""
         # Test empty.
         result = parse_json_object_from_request(

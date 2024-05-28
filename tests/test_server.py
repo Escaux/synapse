@@ -1,16 +1,22 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import re
 from http import HTTPStatus
@@ -38,7 +44,7 @@ from tests.http.server._base import test_disconnect
 from tests.server import (
     FakeChannel,
     FakeSite,
-    ThreadedMemoryReactorClock,
+    get_clock,
     make_request,
     setup_test_homeserver,
 )
@@ -46,12 +52,11 @@ from tests.server import (
 
 class JsonResourceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.reactor = ThreadedMemoryReactorClock()
-        self.hs_clock = Clock(self.reactor)
+        reactor, clock = get_clock()
+        self.reactor = reactor
         self.homeserver = setup_test_homeserver(
             self.addCleanup,
-            federation_http_client=None,
-            clock=self.hs_clock,
+            clock=clock,
             reactor=self.reactor,
         )
 
@@ -209,7 +214,13 @@ class JsonResourceTests(unittest.TestCase):
 
 class OptionsResourceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.reactor = ThreadedMemoryReactorClock()
+        reactor, clock = get_clock()
+        self.reactor = reactor
+        self.homeserver = setup_test_homeserver(
+            self.addCleanup,
+            clock=clock,
+            reactor=self.reactor,
+        )
 
         class DummyResource(Resource):
             isLeaf = True
@@ -242,6 +253,7 @@ class OptionsResourceTests(unittest.TestCase):
             "1.0",
             max_request_body_size=4096,
             reactor=self.reactor,
+            hs=self.homeserver,
         )
 
         # render the request and return the channel
@@ -265,6 +277,10 @@ class OptionsResourceTests(unittest.TestCase):
             channel.headers.getRawHeaders(b"Access-Control-Allow-Headers"),
             [b"X-Requested-With, Content-Type, Authorization, Date"],
             "has correct CORS Headers header",
+        )
+        self.assertEqual(
+            channel.headers.getRawHeaders(b"Access-Control-Expose-Headers"),
+            [b"Synapse-Trace-Id, Server"],
         )
 
     def _check_cors_msc3886_headers(self, channel: FakeChannel) -> None:
@@ -340,7 +356,8 @@ class WrapHtmlRequestHandlerTests(unittest.TestCase):
             await self.callback(request)
 
     def setUp(self) -> None:
-        self.reactor = ThreadedMemoryReactorClock()
+        reactor, _ = get_clock()
+        self.reactor = reactor
 
     def test_good_response(self) -> None:
         async def callback(request: SynapseRequest) -> None:
@@ -458,9 +475,9 @@ class DirectServeJsonResourceCancellationTests(unittest.TestCase):
     """Tests for `DirectServeJsonResource` cancellation."""
 
     def setUp(self) -> None:
-        self.reactor = ThreadedMemoryReactorClock()
-        self.clock = Clock(self.reactor)
-        self.resource = CancellableDirectServeJsonResource(self.clock)
+        reactor, clock = get_clock()
+        self.reactor = reactor
+        self.resource = CancellableDirectServeJsonResource(clock)
         self.site = FakeSite(self.resource, self.reactor)
 
     def test_cancellable_disconnect(self) -> None:
@@ -492,9 +509,9 @@ class DirectServeHtmlResourceCancellationTests(unittest.TestCase):
     """Tests for `DirectServeHtmlResource` cancellation."""
 
     def setUp(self) -> None:
-        self.reactor = ThreadedMemoryReactorClock()
-        self.clock = Clock(self.reactor)
-        self.resource = CancellableDirectServeHtmlResource(self.clock)
+        reactor, clock = get_clock()
+        self.reactor = reactor
+        self.resource = CancellableDirectServeHtmlResource(clock)
         self.site = FakeSite(self.resource, self.reactor)
 
     def test_cancellable_disconnect(self) -> None:

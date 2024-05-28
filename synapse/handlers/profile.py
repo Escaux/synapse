@@ -1,19 +1,26 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 import random
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from synapse.api.errors import (
     AuthError,
@@ -23,6 +30,7 @@ from synapse.api.errors import (
     StoreError,
     SynapseError,
 )
+from synapse.storage.databases.main.media_repository import LocalMedia, RemoteMedia
 from synapse.types import JsonDict, Requester, UserID, create_requester
 from synapse.util.caches.descriptors import cached
 from synapse.util.stringutils import parse_and_validate_mxc_uri
@@ -59,16 +67,16 @@ class ProfileHandler:
         self.max_avatar_size = hs.config.server.max_avatar_size
         self.allowed_avatar_mimetypes = hs.config.server.allowed_avatar_mimetypes
 
-        self.server_name = hs.config.server.server_name
+        self._is_mine_server_name = hs.is_mine_server_name
 
-        self._third_party_rules = hs.get_third_party_event_rules()
+        self._third_party_rules = hs.get_module_api_callbacks().third_party_event_rules
 
-    async def get_profile(self, user_id: str) -> JsonDict:
+    async def get_profile(self, user_id: str, ignore_backoff: bool = True) -> JsonDict:
         target_user = UserID.from_string(user_id)
 
         if self.hs.is_mine(target_user):
-            profileinfo = await self.store.get_profileinfo(target_user.localpart)
-            if profileinfo.display_name is None:
+            profileinfo = await self.store.get_profileinfo(target_user)
+            if profileinfo.display_name is None and profileinfo.avatar_url is None:
                 raise SynapseError(404, "Profile was not found", Codes.NOT_FOUND)
 
             return {
@@ -81,7 +89,7 @@ class ProfileHandler:
                     destination=target_user.domain,
                     query_type="profile",
                     args={"user_id": user_id},
-                    ignore_backoff=True,
+                    ignore_backoff=ignore_backoff,
                 )
                 return result
             except RequestSendFailed as e:
@@ -99,9 +107,7 @@ class ProfileHandler:
     async def get_displayname(self, target_user: UserID) -> Optional[str]:
         if self.hs.is_mine(target_user):
             try:
-                displayname = await self.store.get_profile_displayname(
-                    target_user.localpart
-                )
+                displayname = await self.store.get_profile_displayname(target_user)
             except StoreError as e:
                 if e.code == 404:
                     raise SynapseError(404, "Profile was not found", Codes.NOT_FOUND)
@@ -130,6 +136,7 @@ class ProfileHandler:
         new_displayname: str,
         by_admin: bool = False,
         deactivation: bool = False,
+        propagate: bool = True,
     ) -> None:
         """Set the displayname of a user
 
@@ -139,6 +146,7 @@ class ProfileHandler:
             new_displayname: The displayname to give this user.
             by_admin: Whether this change was made by an administrator.
             deactivation: Whether this change was made while deactivating the user.
+            propagate: Whether this change also applies to the user's membership events.
         """
         if not self.hs.is_mine(target_user):
             raise SynapseError(400, "User is not hosted on this homeserver")
@@ -147,7 +155,7 @@ class ProfileHandler:
             raise AuthError(400, "Cannot set another user's displayname")
 
         if not by_admin and not self.hs.config.registration.enable_set_displayname:
-            profile = await self.store.get_profileinfo(target_user.localpart)
+            profile = await self.store.get_profileinfo(target_user)
             if profile.display_name:
                 raise SynapseError(
                     400,
@@ -165,24 +173,22 @@ class ProfileHandler:
                 400, "Displayname is too long (max %i)" % (MAX_DISPLAYNAME_LEN,)
             )
 
-        displayname_to_set: Optional[str] = new_displayname
+        displayname_to_set: Optional[str] = new_displayname.strip()
         if new_displayname == "":
             displayname_to_set = None
 
         # If the admin changes the display name of a user, the requesting user cannot send
-        # the join event to update the displayname in the rooms.
-        # This must be done by the target user himself.
+        # the join event to update the display name in the rooms.
+        # This must be done by the target user themselves.
         if by_admin:
             requester = create_requester(
                 target_user,
                 authenticated_entity=requester.authenticated_entity,
             )
 
-        await self.store.set_profile_displayname(
-            target_user.localpart, displayname_to_set
-        )
+        await self.store.set_profile_displayname(target_user, displayname_to_set)
 
-        profile = await self.store.get_profileinfo(target_user.localpart)
+        profile = await self.store.get_profileinfo(target_user)
         await self.user_directory_handler.handle_local_profile_change(
             target_user.to_string(), profile
         )
@@ -191,14 +197,13 @@ class ProfileHandler:
             target_user.to_string(), profile, by_admin, deactivation
         )
 
-        await self._update_join_states(requester, target_user)
+        if propagate:
+            await self._update_join_states(requester, target_user)
 
     async def get_avatar_url(self, target_user: UserID) -> Optional[str]:
         if self.hs.is_mine(target_user):
             try:
-                avatar_url = await self.store.get_profile_avatar_url(
-                    target_user.localpart
-                )
+                avatar_url = await self.store.get_profile_avatar_url(target_user)
             except StoreError as e:
                 if e.code == 404:
                     raise SynapseError(404, "Profile was not found", Codes.NOT_FOUND)
@@ -226,6 +231,7 @@ class ProfileHandler:
         new_avatar_url: str,
         by_admin: bool = False,
         deactivation: bool = False,
+        propagate: bool = True,
     ) -> None:
         """Set a new avatar URL for a user.
 
@@ -235,6 +241,7 @@ class ProfileHandler:
             new_avatar_url: The avatar URL to give this user.
             by_admin: Whether this change was made by an administrator.
             deactivation: Whether this change was made while deactivating the user.
+            propagate: Whether this change also applies to the user's membership events.
         """
         if not self.hs.is_mine(target_user):
             raise SynapseError(400, "User is not hosted on this homeserver")
@@ -243,7 +250,7 @@ class ProfileHandler:
             raise AuthError(400, "Cannot set another user's avatar_url")
 
         if not by_admin and not self.hs.config.registration.enable_set_avatar_url:
-            profile = await self.store.get_profileinfo(target_user.localpart)
+            profile = await self.store.get_profileinfo(target_user)
             if profile.avatar_url:
                 raise SynapseError(
                     400, "Changing avatar is disabled on this server", Codes.FORBIDDEN
@@ -272,11 +279,9 @@ class ProfileHandler:
                 target_user, authenticated_entity=requester.authenticated_entity
             )
 
-        await self.store.set_profile_avatar_url(
-            target_user.localpart, avatar_url_to_set
-        )
+        await self.store.set_profile_avatar_url(target_user, avatar_url_to_set)
 
-        profile = await self.store.get_profileinfo(target_user.localpart)
+        profile = await self.store.get_profileinfo(target_user)
         await self.user_directory_handler.handle_local_profile_change(
             target_user.to_string(), profile
         )
@@ -285,7 +290,8 @@ class ProfileHandler:
             target_user.to_string(), profile, by_admin, deactivation
         )
 
-        await self._update_join_states(requester, target_user)
+        if propagate:
+            await self._update_join_states(requester, target_user)
 
     @cached()
     async def check_avatar_size_and_mime_type(self, mxc: str) -> bool:
@@ -313,8 +319,10 @@ class ProfileHandler:
         else:
             server_name = host
 
-        if server_name == self.server_name:
-            media_info = await self.store.get_local_media(media_id)
+        if self._is_mine_server_name(server_name):
+            media_info: Optional[Union[LocalMedia, RemoteMedia]] = (
+                await self.store.get_local_media(media_id)
+            )
         else:
             media_info = await self.store.get_cached_remote_media(server_name, media_id)
 
@@ -330,12 +338,12 @@ class ProfileHandler:
 
         if self.max_avatar_size:
             # Ensure avatar does not exceed max allowed avatar size
-            if media_info["media_length"] > self.max_avatar_size:
+            if media_info.media_length > self.max_avatar_size:
                 logger.warning(
                     "Forbidding avatar change to %s: %d bytes is above the allowed size "
                     "limit",
                     mxc,
-                    media_info["media_length"],
+                    media_info.media_length,
                 )
                 return False
 
@@ -343,12 +351,12 @@ class ProfileHandler:
             # Ensure the avatar's file type is allowed
             if (
                 self.allowed_avatar_mimetypes
-                and media_info["media_type"] not in self.allowed_avatar_mimetypes
+                and media_info.media_type not in self.allowed_avatar_mimetypes
             ):
                 logger.warning(
                     "Forbidding avatar change to %s: mimetype %s not allowed",
                     mxc,
-                    media_info["media_type"],
+                    media_info.media_type,
                 )
                 return False
 
@@ -373,14 +381,10 @@ class ProfileHandler:
         response = {}
         try:
             if just_field is None or just_field == "displayname":
-                response["displayname"] = await self.store.get_profile_displayname(
-                    user.localpart
-                )
+                response["displayname"] = await self.store.get_profile_displayname(user)
 
             if just_field is None or just_field == "avatar_url":
-                response["avatar_url"] = await self.store.get_profile_avatar_url(
-                    user.localpart
-                )
+                response["avatar_url"] = await self.store.get_profile_avatar_url(user)
         except StoreError as e:
             if e.code == 404:
                 raise SynapseError(404, "Profile was not found", Codes.NOT_FOUND)

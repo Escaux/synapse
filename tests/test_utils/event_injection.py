@@ -1,18 +1,24 @@
-# Copyright 2018 New Vector Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from typing import List, Optional, Tuple
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
+from typing import Any, List, Optional, Tuple
 
 import synapse.server
 from synapse.api.constants import EventTypes
@@ -32,7 +38,7 @@ async def inject_member_event(
     membership: str,
     target: Optional[str] = None,
     extra_content: Optional[dict] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> EventBase:
     """Inject a membership event into a room."""
     if target is None:
@@ -57,7 +63,7 @@ async def inject_event(
     hs: synapse.server.HomeServer,
     room_version: Optional[str] = None,
     prev_event_ids: Optional[List[str]] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> EventBase:
     """Inject a generic event into a room
 
@@ -82,7 +88,7 @@ async def create_event(
     hs: synapse.server.HomeServer,
     room_version: Optional[str] = None,
     prev_event_ids: Optional[List[str]] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> Tuple[EventBase, EventContext]:
     if room_version is None:
         room_version = await hs.get_datastores().main.get_room_version_id(
@@ -92,8 +98,44 @@ async def create_event(
     builder = hs.get_event_builder_factory().for_room_version(
         KNOWN_ROOM_VERSIONS[room_version], kwargs
     )
-    event, context = await hs.get_event_creation_handler().create_new_client_event(
+    (
+        event,
+        unpersisted_context,
+    ) = await hs.get_event_creation_handler().create_new_client_event(
         builder, prev_event_ids=prev_event_ids
     )
 
+    context = await unpersisted_context.persist(event)
+
     return event, context
+
+
+async def mark_event_as_partial_state(
+    hs: synapse.server.HomeServer,
+    event_id: str,
+    room_id: str,
+) -> None:
+    """
+    (Falsely) mark an event as having partial state.
+
+    Naughty, but occasionally useful when checking that partial state doesn't
+    block something from happening.
+
+    If the event already has partial state, this insert will fail (event_id is unique
+    in this table).
+    """
+    store = hs.get_datastores().main
+    await store.db_pool.simple_upsert(
+        table="partial_state_rooms",
+        keyvalues={"room_id": room_id},
+        values={},
+        insertion_values={"room_id": room_id},
+    )
+
+    await store.db_pool.simple_insert(
+        table="partial_state_events",
+        values={
+            "room_id": room_id,
+            "event_id": event_id,
+        },
+    )

@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import abc
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Generic, Mapping, Optional, TypeVar
@@ -41,8 +48,7 @@ class BaseDatabaseEngine(Generic[ConnectionType, CursorType], metaclass=abc.ABCM
 
     @property
     @abc.abstractmethod
-    def single_threaded(self) -> bool:
-        ...
+    def single_threaded(self) -> bool: ...
 
     @property
     @abc.abstractmethod
@@ -61,8 +67,7 @@ class BaseDatabaseEngine(Generic[ConnectionType, CursorType], metaclass=abc.ABCM
     @abc.abstractmethod
     def check_database(
         self, db_conn: ConnectionType, allow_outdated_version: bool = False
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @abc.abstractmethod
     def check_new_database(self, txn: CursorType) -> None:
@@ -72,32 +77,33 @@ class BaseDatabaseEngine(Generic[ConnectionType, CursorType], metaclass=abc.ABCM
         ...
 
     @abc.abstractmethod
-    def convert_param_style(self, sql: str) -> str:
-        ...
+    def convert_param_style(self, sql: str) -> str: ...
 
     # This method would ideally take a plain ConnectionType, but it seems that
     # the Sqlite engine expects to use LoggingDatabaseConnection.cursor
     # instead of sqlite3.Connection.cursor: only the former takes a txn_name.
     @abc.abstractmethod
-    def on_new_connection(self, db_conn: "LoggingDatabaseConnection") -> None:
-        ...
+    def on_new_connection(self, db_conn: "LoggingDatabaseConnection") -> None: ...
 
     @abc.abstractmethod
-    def is_deadlock(self, error: Exception) -> bool:
-        ...
+    def is_deadlock(self, error: Exception) -> bool: ...
 
     @abc.abstractmethod
-    def is_connection_closed(self, conn: ConnectionType) -> bool:
-        ...
+    def is_connection_closed(self, conn: ConnectionType) -> bool: ...
 
     @abc.abstractmethod
-    def lock_table(self, txn: Cursor, table: str) -> None:
-        ...
+    def lock_table(self, txn: Cursor, table: str) -> None: ...
 
     @property
     @abc.abstractmethod
     def server_version(self) -> str:
         """Gets a string giving the server version. For example: '3.22.0'"""
+        ...
+
+    @property
+    @abc.abstractmethod
+    def row_id_name(self) -> str:
+        """Gets the literal name representing a row id for this engine."""
         ...
 
     @abc.abstractmethod
@@ -132,6 +138,10 @@ class BaseDatabaseEngine(Generic[ConnectionType, CursorType], metaclass=abc.ABCM
         """Execute a chunk of SQL containing multiple semicolon-delimited statements.
 
         This is not provided by DBAPI2, and so needs engine-specific support.
+
+        Any ongoing transaction is committed before executing the script in its own
+        transaction. The script transaction is left open and it is the responsibility of
+        the caller to commit it.
         """
         ...
 
@@ -141,5 +151,5 @@ class BaseDatabaseEngine(Generic[ConnectionType, CursorType], metaclass=abc.ABCM
 
         This is not provided by DBAPI2, and so needs engine-specific support.
         """
-        with open(filepath, "rt") as f:
+        with open(filepath) as f:
             cls.executescript(cursor, f.read())

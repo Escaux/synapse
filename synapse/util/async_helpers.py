@@ -1,17 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2018 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import abc
 import asyncio
@@ -19,15 +25,18 @@ import collections
 import inspect
 import itertools
 import logging
+import typing
 from contextlib import asynccontextmanager
 from typing import (
     Any,
+    AsyncContextManager,
     AsyncIterator,
     Awaitable,
     Callable,
     Collection,
     Coroutine,
     Dict,
+    Generator,
     Generic,
     Hashable,
     Iterable,
@@ -42,7 +51,7 @@ from typing import (
 )
 
 import attr
-from typing_extensions import AsyncContextManager, Concatenate, Literal, ParamSpec
+from typing_extensions import Concatenate, Literal, ParamSpec
 
 from twisted.internet import defer
 from twisted.internet.defer import CancelledError
@@ -138,7 +147,7 @@ class ObservableDeferred(Generic[_T], AbstractObservableDeferred[_T]):
             for observer in observers:
                 # This is a little bit of magic to correctly propagate stack
                 # traces when we `await` on one of the observer deferreds.
-                f.value.__failure__ = f  # type: ignore[union-attr]
+                f.value.__failure__ = f
                 try:
                     observer.errback(f)
                 except Exception as e:
@@ -275,15 +284,7 @@ async def yieldable_gather_results(
     try:
         return await make_deferred_yieldable(
             defer.gatherResults(
-                # type-ignore: mypy reports two errors:
-                # error: Argument 1 to "run_in_background" has incompatible type
-                #     "Callable[[T, **P], Awaitable[R]]"; expected
-                #     "Callable[[T, **P], Awaitable[R]]"  [arg-type]
-                # error: Argument 2 to "run_in_background" has incompatible type
-                #     "T"; expected "[T, **P.args]"  [arg-type]
-                # The former looks like a mypy bug, and the latter looks like a
-                # false positive.
-                [run_in_background(func, item, *args, **kwargs) for item in iter],  # type: ignore[arg-type]
+                [run_in_background(func, item, *args, **kwargs) for item in iter],
                 consumeErrors=True,
             )
         )
@@ -329,7 +330,7 @@ async def yieldable_gather_results_delaying_cancellation(
         return await make_deferred_yieldable(
             delay_cancellation(
                 defer.gatherResults(
-                    [run_in_background(func, item, *args, **kwargs) for item in iter],  # type: ignore[arg-type]
+                    [run_in_background(func, item, *args, **kwargs) for item in iter],
                     consumeErrors=True,
                 )
             )
@@ -342,29 +343,27 @@ async def yieldable_gather_results_delaying_cancellation(
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 T3 = TypeVar("T3")
+T4 = TypeVar("T4")
 
 
 @overload
 def gather_results(
     deferredList: Tuple[()], consumeErrors: bool = ...
-) -> "defer.Deferred[Tuple[()]]":
-    ...
+) -> "defer.Deferred[Tuple[()]]": ...
 
 
 @overload
 def gather_results(
     deferredList: Tuple["defer.Deferred[T1]"],
     consumeErrors: bool = ...,
-) -> "defer.Deferred[Tuple[T1]]":
-    ...
+) -> "defer.Deferred[Tuple[T1]]": ...
 
 
 @overload
 def gather_results(
     deferredList: Tuple["defer.Deferred[T1]", "defer.Deferred[T2]"],
     consumeErrors: bool = ...,
-) -> "defer.Deferred[Tuple[T1, T2]]":
-    ...
+) -> "defer.Deferred[Tuple[T1, T2]]": ...
 
 
 @overload
@@ -373,8 +372,19 @@ def gather_results(
         "defer.Deferred[T1]", "defer.Deferred[T2]", "defer.Deferred[T3]"
     ],
     consumeErrors: bool = ...,
-) -> "defer.Deferred[Tuple[T1, T2, T3]]":
-    ...
+) -> "defer.Deferred[Tuple[T1, T2, T3]]": ...
+
+
+@overload
+def gather_results(
+    deferredList: Tuple[
+        "defer.Deferred[T1]",
+        "defer.Deferred[T2]",
+        "defer.Deferred[T3]",
+        "defer.Deferred[T4]",
+    ],
+    consumeErrors: bool = ...,
+) -> "defer.Deferred[Tuple[T1, T2, T3, T4]]": ...
 
 
 def gather_results(  # type: ignore[misc]
@@ -397,7 +407,7 @@ class _LinearizerEntry:
     # The number of things executing.
     count: int
     # Deferreds for the things blocked from executing.
-    deferreds: collections.OrderedDict
+    deferreds: typing.OrderedDict["defer.Deferred[None]", Literal[1]]
 
 
 class Linearizer:
@@ -716,30 +726,25 @@ def timeout_deferred(
     return new_d
 
 
-# This class can't be generic because it uses slots with attrs.
-# See: https://github.com/python-attrs/attrs/issues/313
 @attr.s(slots=True, frozen=True, auto_attribs=True)
-class DoneAwaitable:  # should be: Generic[R]
+class DoneAwaitable(Awaitable[R]):
     """Simple awaitable that returns the provided value."""
 
-    value: Any  # should be: R
+    value: R
 
-    def __await__(self) -> Any:
-        return self
-
-    def __iter__(self) -> "DoneAwaitable":
-        return self
-
-    def __next__(self) -> None:
-        raise StopIteration(self.value)
+    def __await__(self) -> Generator[Any, None, R]:
+        yield None
+        return self.value
 
 
 def maybe_awaitable(value: Union[Awaitable[R], R]) -> Awaitable[R]:
     """Convert a value to an awaitable if not already an awaitable."""
     if inspect.isawaitable(value):
-        assert isinstance(value, Awaitable)
         return value
 
+    # For some reason mypy doesn't deduce that value is not Awaitable here, even though
+    # inspect.isawaitable returns a TypeGuard.
+    assert not isinstance(value, Awaitable)
     return DoneAwaitable(value)
 
 
@@ -764,18 +769,15 @@ def stop_cancellation(deferred: "defer.Deferred[T]") -> "defer.Deferred[T]":
 
 
 @overload
-def delay_cancellation(awaitable: "defer.Deferred[T]") -> "defer.Deferred[T]":
-    ...
+def delay_cancellation(awaitable: "defer.Deferred[T]") -> "defer.Deferred[T]": ...
 
 
 @overload
-def delay_cancellation(awaitable: Coroutine[Any, Any, T]) -> "defer.Deferred[T]":
-    ...
+def delay_cancellation(awaitable: Coroutine[Any, Any, T]) -> "defer.Deferred[T]": ...
 
 
 @overload
-def delay_cancellation(awaitable: Awaitable[T]) -> Awaitable[T]:
-    ...
+def delay_cancellation(awaitable: Awaitable[T]) -> Awaitable[T]: ...
 
 
 def delay_cancellation(awaitable: Awaitable[T]) -> Awaitable[T]:

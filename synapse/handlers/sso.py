@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import abc
 import hashlib
 import io
@@ -20,18 +27,18 @@ from typing import (
     Any,
     Awaitable,
     Callable,
-    Collection,
     Dict,
     Iterable,
     List,
     Mapping,
+    NoReturn,
     Optional,
     Set,
 )
 from urllib.parse import urlencode
 
 import attr
-from typing_extensions import NoReturn, Protocol
+from typing_extensions import Protocol
 
 from twisted.web.iweb import IRequest
 from twisted.web.server import Request
@@ -47,6 +54,7 @@ from synapse.http.server import respond_with_html, respond_with_redirect
 from synapse.http.site import SynapseRequest
 from synapse.types import (
     JsonDict,
+    StrCollection,
     UserID,
     contains_invalid_mxid_characters,
     create_requester,
@@ -141,7 +149,8 @@ class UserAttributes:
     confirm_localpart: bool = False
     display_name: Optional[str] = None
     picture: Optional[str] = None
-    emails: Collection[str] = attr.Factory(list)
+    # mypy thinks these are incompatible for some reason.
+    emails: StrCollection = attr.Factory(list)
 
 
 @attr.s(slots=True, auto_attribs=True)
@@ -159,7 +168,8 @@ class UsernameMappingSession:
 
     # attributes returned by the ID mapper
     display_name: Optional[str]
-    emails: Collection[str]
+    emails: StrCollection
+    avatar_url: Optional[str]
 
     # An optional dictionary of extra attributes to be provided to the client in the
     # login response.
@@ -174,7 +184,8 @@ class UsernameMappingSession:
     # choices made by the user
     chosen_localpart: Optional[str] = None
     use_display_name: bool = True
-    emails_to_use: Collection[str] = ()
+    use_avatar: bool = True
+    emails_to_use: StrCollection = ()
     terms_accepted_version: Optional[str] = None
 
 
@@ -193,6 +204,7 @@ class SsoHandler:
         self._clock = hs.get_clock()
         self._store = hs.get_datastores().main
         self._server_name = hs.hostname
+        self._is_mine_server_name = hs.is_mine_server_name
         self._registration_handler = hs.get_registration_handler()
         self._auth_handler = hs.get_auth_handler()
         self._device_handler = hs.get_device_handler()
@@ -202,7 +214,7 @@ class SsoHandler:
         self._media_repo = (
             hs.get_media_repository() if hs.config.media.can_load_media_repo else None
         )
-        self._http_client = hs.get_proxied_blacklisted_http_client()
+        self._http_client = hs.get_proxied_blocklisted_http_client()
 
         # The following template is shown after a successful user interactive
         # authentication session. It tells the user they can close the window.
@@ -382,6 +394,7 @@ class SsoHandler:
         grandfather_existing_users: Callable[[], Awaitable[Optional[str]]],
         extra_login_attributes: Optional[JsonDict] = None,
         auth_provider_session_id: Optional[str] = None,
+        registration_enabled: bool = True,
     ) -> None:
         """
         Given an SSO ID, retrieve the user ID for it and possibly register the user.
@@ -434,6 +447,10 @@ class SsoHandler:
 
             auth_provider_session_id: An optional session ID from the IdP.
 
+            registration_enabled: An optional boolean to enable/disable automatic
+            registrations of new users. If false and the user does not exist then the
+            flow is aborted. Defaults to true.
+
         Raises:
             MappingException if there was a problem mapping the response to a user.
             RedirectException: if the mapping provider needs to redirect the user
@@ -461,8 +478,16 @@ class SsoHandler:
                         auth_provider_id, remote_user_id, user_id
                     )
 
-            # Otherwise, generate a new user.
-            if not user_id:
+            if not user_id and not registration_enabled:
+                logger.info(
+                    "User does not exist and registration are disabled for IdP '%s' and remote_user_id '%s'",
+                    auth_provider_id,
+                    remote_user_id,
+                )
+                raise MappingException(
+                    "User does not exist and registrations are disabled"
+                )
+            elif not user_id:  # Otherwise, generate a new user.
                 attributes = await self._call_attribute_mapper(sso_to_matrix_id_mapper)
 
                 next_step_url = self._get_url_for_next_new_user_step(
@@ -637,6 +662,9 @@ class SsoHandler:
             remote_user_id=remote_user_id,
             display_name=attributes.display_name,
             emails=attributes.emails,
+            avatar_url=attributes.picture,
+            # Default to using all mapped emails. Will be overwritten in handle_submit_username_request.
+            emails_to_use=attributes.emails,
             client_redirect_url=client_redirect_url,
             expiry_time_ms=now + self._MAPPING_SESSION_VALIDITY_PERIOD_MS,
             extra_login_attributes=extra_login_attributes,
@@ -776,7 +804,7 @@ class SsoHandler:
 
             if code != 200:
                 raise Exception(
-                    "GET request to download sso avatar image returned {}".format(code)
+                    f"GET request to download sso avatar image returned {code}"
                 )
 
             # upload name includes hash of the image file's content so that we can
@@ -788,9 +816,9 @@ class SsoHandler:
             if profile["avatar_url"] is not None:
                 server_name = profile["avatar_url"].split("/")[-2]
                 media_id = profile["avatar_url"].split("/")[-1]
-                if server_name == self._server_name:
+                if self._is_mine_server_name(server_name):
                     media = await self._media_repo.store.get_local_media(media_id)
-                    if media is not None and upload_name == media["upload_name"]:
+                    if media is not None and upload_name == media.upload_name:
                         logger.info("skipping saving the user avatar")
                         return True
 
@@ -943,6 +971,7 @@ class SsoHandler:
         session_id: str,
         localpart: str,
         use_display_name: bool,
+        use_avatar: bool,
         emails_to_use: Iterable[str],
     ) -> None:
         """Handle a request to the username-picker 'submit' endpoint
@@ -965,6 +994,7 @@ class SsoHandler:
         # update the session with the user's choices
         session.chosen_localpart = localpart
         session.use_display_name = use_display_name
+        session.use_avatar = use_avatar
 
         emails_from_idp = set(session.emails)
         filtered_emails: Set[str] = set()
@@ -1044,6 +1074,9 @@ class SsoHandler:
 
         if session.use_display_name:
             attributes.display_name = session.display_name
+
+        if session.use_avatar:
+            attributes.picture = session.avatar_url
 
         # the following will raise a 400 error if the username has been taken in the
         # meantime.
@@ -1190,10 +1223,7 @@ class SsoHandler:
         # We have no guarantee that all the devices of that session are for the same
         # `user_id`. Hence, we have to iterate over the list of devices and log them out
         # one by one.
-        for device in devices:
-            user_id = device["user_id"]
-            device_id = device["device_id"]
-
+        for user_id, device_id in devices:
             # If the user_id associated with that device/session is not the one we got
             # out of the `sub` claim, skip that device and show log an error.
             if expected_user_id is not None and user_id != expected_user_id:

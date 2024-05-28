@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import synapse.app.homeserver
 from synapse.config._base import ConfigError
@@ -19,13 +26,15 @@ from tests.config.utils import ConfigFileTestCase
 
 
 class HomeserverAppStartTestCase(ConfigFileTestCase):
-    def test_wrong_start_caught(self):
+    def test_wrong_start_caught(self) -> None:
         # Generate a config with a worker_app
         self.generate_config()
         # Add a blank line as otherwise the next addition ends up on a line with a comment
         self.add_lines_to_config(["  "])
         self.add_lines_to_config(["worker_app: test_worker_app"])
-
+        self.add_lines_to_config(["worker_log_config: /data/logconfig.config"])
+        self.add_lines_to_config(["instance_map:"])
+        self.add_lines_to_config(["  main:", "    host: 127.0.0.1", "    port: 1234"])
         # Ensure that starting master process with worker config raises an exception
         with self.assertRaises(ConfigError):
             synapse.app.homeserver.setup(["-c", self.config_file])

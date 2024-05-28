@@ -1,19 +1,26 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2018-2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import unittest
-from typing import Collection, Dict, Iterable, List, Optional
+from typing import Any, Collection, Dict, Iterable, List, Optional
 
 from parameterized import parameterized
 
@@ -31,13 +38,13 @@ from tests.test_utils import get_awaitable_result
 class _StubEventSourceStore:
     """A stub implementation of the EventSourceStore"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._store: Dict[str, EventBase] = {}
 
-    def add_event(self, event: EventBase):
+    def add_event(self, event: EventBase) -> None:
         self._store[event.event_id] = event
 
-    def add_events(self, events: Iterable[EventBase]):
+    def add_events(self, events: Iterable[EventBase]) -> None:
         for event in events:
             self._store[event.event_id] = event
 
@@ -59,7 +66,7 @@ class _StubEventSourceStore:
 
 
 class EventAuthTestCase(unittest.TestCase):
-    def test_rejected_auth_events(self):
+    def test_rejected_auth_events(self) -> None:
         """
         Events that refer to rejected events in their auth events are rejected
         """
@@ -109,7 +116,7 @@ class EventAuthTestCase(unittest.TestCase):
                 )
             )
 
-    def test_create_event_with_prev_events(self):
+    def test_create_event_with_prev_events(self) -> None:
         """A create event with prev_events should be rejected
 
         https://spec.matrix.org/v1.3/rooms/v9/#authorization-rules
@@ -150,7 +157,7 @@ class EventAuthTestCase(unittest.TestCase):
                 event_auth.check_state_independent_auth_rules(event_store, bad_event)
             )
 
-    def test_duplicate_auth_events(self):
+    def test_duplicate_auth_events(self) -> None:
         """Events with duplicate auth_events should be rejected
 
         https://spec.matrix.org/v1.3/rooms/v9/#authorization-rules
@@ -196,7 +203,7 @@ class EventAuthTestCase(unittest.TestCase):
                 event_auth.check_state_independent_auth_rules(event_store, bad_event2)
             )
 
-    def test_unexpected_auth_events(self):
+    def test_unexpected_auth_events(self) -> None:
         """Events with excess auth_events should be rejected
 
         https://spec.matrix.org/v1.3/rooms/v9/#authorization-rules
@@ -236,7 +243,7 @@ class EventAuthTestCase(unittest.TestCase):
                 event_auth.check_state_independent_auth_rules(event_store, bad_event)
             )
 
-    def test_random_users_cannot_send_state_before_first_pl(self):
+    def test_random_users_cannot_send_state_before_first_pl(self) -> None:
         """
         Check that, before the first PL lands, the creator is the only user
         that can send a state event.
@@ -263,7 +270,7 @@ class EventAuthTestCase(unittest.TestCase):
             auth_events,
         )
 
-    def test_state_default_level(self):
+    def test_state_default_level(self) -> None:
         """
         Check that users above the state_default level can send state and
         those below cannot
@@ -298,7 +305,7 @@ class EventAuthTestCase(unittest.TestCase):
             auth_events,
         )
 
-    def test_alias_event(self):
+    def test_alias_event(self) -> None:
         """Alias events have special behavior up through room version 6."""
         creator = "@creator:example.com"
         other = "@other:example.com"
@@ -333,7 +340,7 @@ class EventAuthTestCase(unittest.TestCase):
             auth_events,
         )
 
-    def test_msc2432_alias_event(self):
+    def test_msc2432_alias_event(self) -> None:
         """After MSC2432, alias events have no special behavior."""
         creator = "@creator:example.com"
         other = "@other:example.com"
@@ -366,7 +373,9 @@ class EventAuthTestCase(unittest.TestCase):
             )
 
     @parameterized.expand([(RoomVersions.V1, True), (RoomVersions.V6, False)])
-    def test_notifications(self, room_version: RoomVersion, allow_modification: bool):
+    def test_notifications(
+        self, room_version: RoomVersion, allow_modification: bool
+    ) -> None:
         """
         Notifications power levels get checked due to MSC2209.
         """
@@ -395,7 +404,7 @@ class EventAuthTestCase(unittest.TestCase):
             with self.assertRaises(AuthError):
                 event_auth.check_state_dependent_auth_rules(pl_event, auth_events)
 
-    def test_join_rules_public(self):
+    def test_join_rules_public(self) -> None:
         """
         Test joining a public room.
         """
@@ -460,7 +469,7 @@ class EventAuthTestCase(unittest.TestCase):
             auth_events.values(),
         )
 
-    def test_join_rules_invite(self):
+    def test_join_rules_invite(self) -> None:
         """
         Test joining an invite only room.
         """
@@ -728,6 +737,36 @@ class EventAuthTestCase(unittest.TestCase):
                 pl_event.room_version, pl_event2, {("fake_type", "fake_key"): pl_event}
             )
 
+    def test_room_v10_rejects_other_non_integer_power_levels(self) -> None:
+        """We should reject PLs that are non-integer, non-string JSON values.
+
+        test_room_v10_rejects_string_power_levels above handles the string case.
+        """
+
+        def create_event(pl_event_content: Dict[str, Any]) -> EventBase:
+            return make_event_from_dict(
+                {
+                    "room_id": TEST_ROOM_ID,
+                    **_maybe_get_event_id_dict_for_room_version(RoomVersions.V10),
+                    "type": "m.room.power_levels",
+                    "sender": "@test:test.com",
+                    "state_key": "",
+                    "content": pl_event_content,
+                    "signatures": {"test.com": {"ed25519:0": "some9signature"}},
+                },
+                room_version=RoomVersions.V10,
+            )
+
+        contents: Iterable[Dict[str, Any]] = [
+            {"notifications": {"room": None}},
+            {"users": {"@alice:wonderland": []}},
+            {"users_default": {}},
+        ]
+        for content in contents:
+            event = create_event(content)
+            with self.assertRaises(SynapseError):
+                event_auth._check_power_levels(event.room_version, event, {})
+
 
 # helpers for making events
 TEST_DOMAIN = "example.com"
@@ -805,7 +844,7 @@ def _power_levels_event(
     )
 
 
-def _alias_event(room_version: RoomVersion, sender: str, **kwargs) -> EventBase:
+def _alias_event(room_version: RoomVersion, sender: str, **kwargs: Any) -> EventBase:
     data = {
         "room_id": TEST_ROOM_ID,
         **_maybe_get_event_id_dict_for_room_version(room_version),

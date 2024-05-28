@@ -1,18 +1,25 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from typing import Optional
-from unittest.mock import Mock
+from unittest.mock import AsyncMock
 
 import pymacaroons
 
@@ -25,7 +32,6 @@ from synapse.server import HomeServer
 from synapse.util import Clock
 
 from tests import unittest
-from tests.test_utils import make_awaitable
 
 
 class AuthTestCase(unittest.HomeserverTestCase):
@@ -166,8 +172,8 @@ class AuthTestCase(unittest.HomeserverTestCase):
 
     def test_mau_limits_exceeded_large(self) -> None:
         self.auth_blocking._limit_usage_by_mau = True
-        self.hs.get_datastores().main.get_monthly_active_count = Mock(
-            return_value=make_awaitable(self.large_number_of_users)
+        self.hs.get_datastores().main.get_monthly_active_count = AsyncMock(
+            return_value=self.large_number_of_users
         )
 
         self.get_failure(
@@ -177,8 +183,8 @@ class AuthTestCase(unittest.HomeserverTestCase):
             ResourceLimitError,
         )
 
-        self.hs.get_datastores().main.get_monthly_active_count = Mock(
-            return_value=make_awaitable(self.large_number_of_users)
+        self.hs.get_datastores().main.get_monthly_active_count = AsyncMock(
+            return_value=self.large_number_of_users
         )
         token = self.get_success(
             self.auth_handler.create_login_token_for_user_id(self.user1)
@@ -191,8 +197,8 @@ class AuthTestCase(unittest.HomeserverTestCase):
         self.auth_blocking._limit_usage_by_mau = True
 
         # Set the server to be at the edge of too many users.
-        self.hs.get_datastores().main.get_monthly_active_count = Mock(
-            return_value=make_awaitable(self.auth_blocking._max_mau_value)
+        self.hs.get_datastores().main.get_monthly_active_count = AsyncMock(
+            return_value=self.auth_blocking._max_mau_value
         )
 
         # If not in monthly active cohort
@@ -208,8 +214,8 @@ class AuthTestCase(unittest.HomeserverTestCase):
         self.assertIsNone(self.token_login(token))
 
         # If in monthly active cohort
-        self.hs.get_datastores().main.user_last_seen_monthly_active = Mock(
-            return_value=make_awaitable(self.clock.time_msec())
+        self.hs.get_datastores().main.user_last_seen_monthly_active = AsyncMock(
+            return_value=self.clock.time_msec()
         )
         self.get_success(
             self.auth_handler.create_access_token_for_user_id(
@@ -224,8 +230,8 @@ class AuthTestCase(unittest.HomeserverTestCase):
     def test_mau_limits_not_exceeded(self) -> None:
         self.auth_blocking._limit_usage_by_mau = True
 
-        self.hs.get_datastores().main.get_monthly_active_count = Mock(
-            return_value=make_awaitable(self.small_number_of_users)
+        self.hs.get_datastores().main.get_monthly_active_count = AsyncMock(
+            return_value=self.small_number_of_users
         )
         # Ensure does not raise exception
         self.get_success(
@@ -234,8 +240,8 @@ class AuthTestCase(unittest.HomeserverTestCase):
             )
         )
 
-        self.hs.get_datastores().main.get_monthly_active_count = Mock(
-            return_value=make_awaitable(self.small_number_of_users)
+        self.hs.get_datastores().main.get_monthly_active_count = AsyncMock(
+            return_value=self.small_number_of_users
         )
         token = self.get_success(
             self.auth_handler.create_login_token_for_user_id(self.user1)

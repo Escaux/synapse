@@ -1,40 +1,50 @@
-# Copyright 2018 New Vector
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
-from typing import List
+from typing import List, Optional
 from unittest.mock import Mock, patch
 
 from synapse._scripts.register_new_matrix_user import request_registration
+from synapse.types import JsonDict
 
 from tests.unittest import TestCase
 
 
 class RegisterTestCase(TestCase):
-    def test_success(self):
+    def test_success(self) -> None:
         """
         The script will fetch a nonce, and then generate a MAC with it, and then
         post that MAC.
         """
 
-        def get(url, verify=None):
+        def get(url: str, verify: Optional[bool] = None) -> Mock:
             r = Mock()
             r.status_code = 200
             r.json = lambda: {"nonce": "a"}
             return r
 
-        def post(url, json=None, verify=None):
+        def post(
+            url: str, json: Optional[JsonDict] = None, verify: Optional[bool] = None
+        ) -> Mock:
             # Make sure we are sent the correct info
+            assert json is not None
             self.assertEqual(json["username"], "user")
             self.assertEqual(json["password"], "pass")
             self.assertEqual(json["nonce"], "a")
@@ -70,12 +80,12 @@ class RegisterTestCase(TestCase):
         # sys.exit shouldn't have been called.
         self.assertEqual(err_code, [])
 
-    def test_failure_nonce(self):
+    def test_failure_nonce(self) -> None:
         """
         If the script fails to fetch a nonce, it throws an error and quits.
         """
 
-        def get(url, verify=None):
+        def get(url: str, verify: Optional[bool] = None) -> Mock:
             r = Mock()
             r.status_code = 404
             r.reason = "Not Found"
@@ -107,20 +117,23 @@ class RegisterTestCase(TestCase):
         self.assertIn("ERROR! Received 404 Not Found", out)
         self.assertNotIn("Success!", out)
 
-    def test_failure_post(self):
+    def test_failure_post(self) -> None:
         """
         The script will fetch a nonce, and then if the final POST fails, will
         report an error and quit.
         """
 
-        def get(url, verify=None):
+        def get(url: str, verify: Optional[bool] = None) -> Mock:
             r = Mock()
             r.status_code = 200
             r.json = lambda: {"nonce": "a"}
             return r
 
-        def post(url, json=None, verify=None):
+        def post(
+            url: str, json: Optional[JsonDict] = None, verify: Optional[bool] = None
+        ) -> Mock:
             # Make sure we are sent the correct info
+            assert json is not None
             self.assertEqual(json["username"], "user")
             self.assertEqual(json["password"], "pass")
             self.assertEqual(json["nonce"], "a")

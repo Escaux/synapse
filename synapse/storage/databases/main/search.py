@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import enum
 import logging
 import re
@@ -26,6 +33,7 @@ from typing import (
     Set,
     Tuple,
     Union,
+    cast,
 )
 
 import attr
@@ -105,7 +113,7 @@ class SearchWorkerStore(SQLBaseStore):
                 txn,
                 table="event_search",
                 keys=("event_id", "room_id", "key", "value"),
-                values=(
+                values=[
                     (
                         entry.event_id,
                         entry.room_id,
@@ -113,7 +121,7 @@ class SearchWorkerStore(SQLBaseStore):
                         _clean_value_for_search(entry.value),
                     )
                     for entry in entries
-                ),
+                ],
             )
 
         else:
@@ -122,7 +130,6 @@ class SearchWorkerStore(SQLBaseStore):
 
 
 class SearchBackgroundUpdateStore(SearchWorkerStore):
-
     EVENT_SEARCH_UPDATE_NAME = "event_search"
     EVENT_SEARCH_ORDER_UPDATE_NAME = "event_search_order"
     EVENT_SEARCH_USE_GIN_POSTGRES_NAME = "event_search_postgres_gin"
@@ -180,22 +187,24 @@ class SearchBackgroundUpdateStore(SearchWorkerStore):
             # store_search_entries_txn with a generator function, but that
             # would mean having two cursors open on the database at once.
             # Instead we just build a list of results.
-            rows = self.db_pool.cursor_to_dict(txn)
+            rows = txn.fetchall()
             if not rows:
                 return 0
 
-            min_stream_id = rows[-1]["stream_ordering"]
+            min_stream_id = rows[-1][0]
 
             event_search_rows = []
-            for row in rows:
+            for (
+                stream_ordering,
+                event_id,
+                room_id,
+                etype,
+                json,
+                origin_server_ts,
+            ) in rows:
                 try:
-                    event_id = row["event_id"]
-                    room_id = row["room_id"]
-                    etype = row["type"]
-                    stream_ordering = row["stream_ordering"]
-                    origin_server_ts = row["origin_server_ts"]
                     try:
-                        event_json = db_to_json(row["json"])
+                        event_json = db_to_json(json)
                         content = event_json["content"]
                     except Exception:
                         continue
@@ -273,7 +282,7 @@ class SearchBackgroundUpdateStore(SearchWorkerStore):
 
             # we have to set autocommit, because postgres refuses to
             # CREATE INDEX CONCURRENTLY without it.
-            conn.set_session(autocommit=True)
+            conn.engine.attempt_to_set_autocommit(conn.conn, True)
 
             try:
                 c = conn.cursor()
@@ -299,7 +308,7 @@ class SearchBackgroundUpdateStore(SearchWorkerStore):
                 # we should now be able to delete the GIST index.
                 c.execute("DROP INDEX IF EXISTS event_search_fts_idx_gist")
             finally:
-                conn.set_session(autocommit=False)
+                conn.engine.attempt_to_set_autocommit(conn.conn, False)
 
         if isinstance(self.database_engine, PostgresEngine):
             await self.db_pool.runWithConnection(create_index)
@@ -321,7 +330,7 @@ class SearchBackgroundUpdateStore(SearchWorkerStore):
 
             def create_index(conn: LoggingDatabaseConnection) -> None:
                 conn.rollback()
-                conn.set_session(autocommit=True)
+                conn.engine.attempt_to_set_autocommit(conn.conn, True)
                 c = conn.cursor()
 
                 # We create with NULLS FIRST so that when we search *backwards*
@@ -338,7 +347,7 @@ class SearchBackgroundUpdateStore(SearchWorkerStore):
                     ON event_search(origin_server_ts NULLS FIRST, stream_ordering NULLS FIRST)
                     """
                 )
-                conn.set_session(autocommit=False)
+                conn.engine.attempt_to_set_autocommit(conn.conn, False)
 
             await self.db_pool.runWithConnection(create_index)
 
@@ -461,6 +470,8 @@ class SearchStore(SearchBackgroundUpdateStore):
         count_args = args
         count_clauses = clauses
 
+        sqlite_highlights: List[str] = []
+
         if isinstance(self.database_engine, PostgresEngine):
             search_query = search_term
             sql = """
@@ -477,7 +488,7 @@ class SearchStore(SearchBackgroundUpdateStore):
             """
             count_args = [search_query] + count_args
         elif isinstance(self.database_engine, Sqlite3Engine):
-            search_query = _parse_query_for_sqlite(search_term)
+            search_query, sqlite_highlights = _parse_query_for_sqlite(search_term)
 
             sql = """
             SELECT rank(matchinfo(event_search)) as rank, room_id, event_id
@@ -505,37 +516,43 @@ class SearchStore(SearchBackgroundUpdateStore):
         # entire table from the database.
         sql += " ORDER BY rank DESC LIMIT 500"
 
-        results = await self.db_pool.execute(
-            "search_msgs", self.db_pool.cursor_to_dict, sql, *args
+        # List of tuples of (rank, room_id, event_id).
+        results = cast(
+            List[Tuple[Union[int, float], str, str]],
+            await self.db_pool.execute("search_msgs", sql, *args),
         )
 
-        results = list(filter(lambda row: row["room_id"] in room_ids, results))
+        results = list(filter(lambda row: row[1] in room_ids, results))
 
         # We set redact_behaviour to block here to prevent redacted events being returned in
         # search results (which is a data leak)
         events = await self.get_events_as_list(  # type: ignore[attr-defined]
-            [r["event_id"] for r in results],
+            [r[2] for r in results],
             redact_behaviour=EventRedactBehaviour.block,
         )
 
         event_map = {ev.event_id: ev for ev in events}
 
-        highlights = None
+        highlights: Collection[str] = []
         if isinstance(self.database_engine, PostgresEngine):
             highlights = await self._find_highlights_in_postgres(search_query, events)
+        else:
+            highlights = sqlite_highlights
 
         count_sql += " GROUP BY room_id"
 
-        count_results = await self.db_pool.execute(
-            "search_rooms_count", self.db_pool.cursor_to_dict, count_sql, *count_args
+        # List of tuples of (room_id, count).
+        count_results = cast(
+            List[Tuple[str, int]],
+            await self.db_pool.execute("search_rooms_count", count_sql, *count_args),
         )
 
-        count = sum(row["count"] for row in count_results if row["room_id"] in room_ids)
+        count = sum(row[1] for row in count_results if row[0] in room_ids)
         return {
             "results": [
-                {"event": event_map[r["event_id"]], "rank": r["rank"]}
+                {"event": event_map[r[2]], "rank": r[0]}
                 for r in results
-                if r["event_id"] in event_map
+                if r[2] in event_map
             ],
             "highlights": highlights,
             "count": count,
@@ -584,6 +601,8 @@ class SearchStore(SearchBackgroundUpdateStore):
         count_args = list(args)
         count_clauses = list(clauses)
 
+        sqlite_highlights: List[str] = []
+
         if pagination_token:
             try:
                 origin_server_ts_str, stream_str = pagination_token.split(",")
@@ -603,7 +622,7 @@ class SearchStore(SearchBackgroundUpdateStore):
             search_query = search_term
             sql = """
             SELECT ts_rank_cd(vector, websearch_to_tsquery('english', ?)) as rank,
-            origin_server_ts, stream_ordering, room_id, event_id
+            room_id, event_id, origin_server_ts, stream_ordering
             FROM event_search
             WHERE vector @@ websearch_to_tsquery('english', ?) AND
             """
@@ -615,7 +634,6 @@ class SearchStore(SearchBackgroundUpdateStore):
             """
             count_args = [search_query] + count_args
         elif isinstance(self.database_engine, Sqlite3Engine):
-
             # We use CROSS JOIN here to ensure we use the right indexes.
             # https://sqlite.org/optoverview.html#crossjoin
             #
@@ -635,7 +653,7 @@ class SearchStore(SearchBackgroundUpdateStore):
             CROSS JOIN events USING (event_id)
             WHERE
             """
-            search_query = _parse_query_for_sqlite(search_term)
+            search_query, sqlite_highlights = _parse_query_for_sqlite(search_term)
             args = [search_query] + args
 
             count_sql = """
@@ -665,43 +683,48 @@ class SearchStore(SearchBackgroundUpdateStore):
         # mypy expects to append only a `str`, not an `int`
         args.append(limit)
 
-        results = await self.db_pool.execute(
-            "search_rooms", self.db_pool.cursor_to_dict, sql, *args
+        # List of tuples of (rank, room_id, event_id, origin_server_ts, stream_ordering).
+        results = cast(
+            List[Tuple[Union[int, float], str, str, int, int]],
+            await self.db_pool.execute("search_rooms", sql, *args),
         )
 
-        results = list(filter(lambda row: row["room_id"] in room_ids, results))
+        results = list(filter(lambda row: row[1] in room_ids, results))
 
         # We set redact_behaviour to block here to prevent redacted events being returned in
         # search results (which is a data leak)
         events = await self.get_events_as_list(  # type: ignore[attr-defined]
-            [r["event_id"] for r in results],
+            [r[2] for r in results],
             redact_behaviour=EventRedactBehaviour.block,
         )
 
         event_map = {ev.event_id: ev for ev in events}
 
-        highlights = None
+        highlights: Collection[str] = []
         if isinstance(self.database_engine, PostgresEngine):
             highlights = await self._find_highlights_in_postgres(search_query, events)
+        else:
+            highlights = sqlite_highlights
 
         count_sql += " GROUP BY room_id"
 
-        count_results = await self.db_pool.execute(
-            "search_rooms_count", self.db_pool.cursor_to_dict, count_sql, *count_args
+        # List of tuples of (room_id, count).
+        count_results = cast(
+            List[Tuple[str, int]],
+            await self.db_pool.execute("search_rooms_count", count_sql, *count_args),
         )
 
-        count = sum(row["count"] for row in count_results if row["room_id"] in room_ids)
+        count = sum(row[1] for row in count_results if row[0] in room_ids)
 
         return {
             "results": [
                 {
-                    "event": event_map[r["event_id"]],
-                    "rank": r["rank"],
-                    "pagination_token": "%s,%s"
-                    % (r["origin_server_ts"], r["stream_ordering"]),
+                    "event": event_map[r[2]],
+                    "rank": r[0],
+                    "pagination_token": "%s,%s" % (r[3], r[4]),
                 }
                 for r in results
-                if r["event_id"] in event_map
+                if r[2] in event_map
             ],
             "highlights": highlights,
             "count": count,
@@ -877,19 +900,25 @@ def _tokenize_query(query: str) -> TokenList:
     return tokens
 
 
-def _tokens_to_sqlite_match_query(tokens: TokenList) -> str:
+def _tokens_to_sqlite_match_query(tokens: TokenList) -> Tuple[str, List[str]]:
     """
     Convert the list of tokens to a string suitable for passing to sqlite's MATCH.
     Assume sqlite was compiled with enhanced query syntax.
 
+    Returns the sqlite-formatted query string and the tokenized search terms
+    that can be used as highlights.
+
     Ref: https://www.sqlite.org/fts3.html#full_text_index_queries
     """
     match_query = []
+    highlights = []
     for token in tokens:
         if isinstance(token, str):
             match_query.append(token)
+            highlights.append(token)
         elif isinstance(token, Phrase):
             match_query.append('"' + " ".join(token.phrase) + '"')
+            highlights.append(" ".join(token.phrase))
         elif token == SearchToken.Not:
             # TODO: SQLite treats NOT as a *binary* operator. Hopefully a search
             # term has already been added before this.
@@ -901,11 +930,14 @@ def _tokens_to_sqlite_match_query(tokens: TokenList) -> str:
         else:
             raise ValueError(f"unknown token {token}")
 
-    return "".join(match_query)
+    return "".join(match_query), highlights
 
 
-def _parse_query_for_sqlite(search_term: str) -> str:
+def _parse_query_for_sqlite(search_term: str) -> Tuple[str, List[str]]:
     """Takes a plain unicode string from the user and converts it into a form
     that can be passed to sqllite's matchinfo().
+
+    Returns the converted query string and the tokenized search terms
+    that can be used as highlights.
     """
     return _tokens_to_sqlite_match_query(_tokenize_query(search_term))

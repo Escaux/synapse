@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 from typing import Optional
 from unittest.mock import patch
 
@@ -84,7 +91,7 @@ class UpgradeRoomTest(unittest.HomeserverTestCase):
                 self.room_id, EventTypes.Tombstone, ""
             )
         )
-        self.assertIsNotNone(tombstone_event)
+        assert tombstone_event is not None
         self.assertEqual(new_room_id, tombstone_event.content["replacement_room"])
 
         # Check that the new room exists.
@@ -199,9 +206,15 @@ class UpgradeRoomTest(unittest.HomeserverTestCase):
 
     def test_stringy_power_levels(self) -> None:
         """The room upgrade converts stringy power levels to proper integers."""
+        # Create a room on room version < 10.
+        room_id = self.helper.create_room_as(
+            self.creator, tok=self.creator_token, room_version="9"
+        )
+        self.helper.join(room_id, self.other, tok=self.other_token)
+
         # Retrieve the room's current power levels.
         power_levels = self.helper.get_state(
-            self.room_id,
+            room_id,
             "m.room.power_levels",
             tok=self.creator_token,
         )
@@ -217,14 +230,14 @@ class UpgradeRoomTest(unittest.HomeserverTestCase):
             # conscience, we ought to ensure it's upgrading from a sufficiently old
             # version of room.
             self.helper.send_state(
-                self.room_id,
+                room_id,
                 "m.room.power_levels",
                 body=power_levels,
                 tok=self.creator_token,
             )
 
         # Upgrade the room. Check the homeserver reports success.
-        channel = self._upgrade_room()
+        channel = self._upgrade_room(room_id=room_id)
         self.assertEqual(200, channel.code, channel.result)
 
         # Extract the new room ID.
@@ -239,6 +252,34 @@ class UpgradeRoomTest(unittest.HomeserverTestCase):
 
         # We should now have an integer power level.
         self.assertEqual(new_power_levels["users"][self.creator], 100, new_power_levels)
+
+    def test_events_field_missing(self) -> None:
+        """Regression test for https://github.com/matrix-org/synapse/issues/16715."""
+        # Create a new room.
+        room_id = self.helper.create_room_as(
+            self.creator, tok=self.creator_token, room_version="10"
+        )
+        self.helper.join(room_id, self.other, tok=self.other_token)
+
+        # Retrieve the room's current power levels.
+        power_levels = self.helper.get_state(
+            room_id,
+            "m.room.power_levels",
+            tok=self.creator_token,
+        )
+
+        # Remove the events field and re-set the power levels.
+        del power_levels["events"]
+        self.helper.send_state(
+            room_id,
+            "m.room.power_levels",
+            body=power_levels,
+            tok=self.creator_token,
+        )
+
+        # Upgrade the room. Check the homeserver reports success.
+        channel = self._upgrade_room(room_id=room_id)
+        self.assertEqual(200, channel.code, channel.result)
 
     def test_space(self) -> None:
         """Test upgrading a space."""

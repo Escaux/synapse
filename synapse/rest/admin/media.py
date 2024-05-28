@@ -1,25 +1,40 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2018-2019 New Vector Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
+import attr
+
+from synapse.api.constants import Direction
 from synapse.api.errors import Codes, NotFoundError, SynapseError
 from synapse.http.server import HttpServer
-from synapse.http.servlet import RestServlet, parse_boolean, parse_integer, parse_string
+from synapse.http.servlet import (
+    RestServlet,
+    parse_boolean,
+    parse_enum,
+    parse_integer,
+    parse_string,
+)
 from synapse.http.site import SynapseRequest
 from synapse.rest.admin._base import (
     admin_patterns,
@@ -251,7 +266,7 @@ class DeleteMediaByID(RestServlet):
     def __init__(self, hs: "HomeServer"):
         self.store = hs.get_datastores().main
         self.auth = hs.get_auth()
-        self.server_name = hs.hostname
+        self._is_mine_server_name = hs.is_mine_server_name
         self.media_repository = hs.get_media_repository()
 
     async def on_DELETE(
@@ -259,7 +274,7 @@ class DeleteMediaByID(RestServlet):
     ) -> Tuple[int, JsonDict]:
         await assert_requester_is_admin(self.auth, request)
 
-        if self.server_name != server_name:
+        if not self._is_mine_server_name(server_name):
             raise SynapseError(HTTPStatus.BAD_REQUEST, "Can only delete local media")
 
         if await self.store.get_local_media(media_id) is None:
@@ -278,7 +293,12 @@ class DeleteMediaByDateSize(RestServlet):
     timestamp and size.
     """
 
-    PATTERNS = admin_patterns("/media/(?P<server_name>[^/]*)/delete$")
+    PATTERNS = [
+        *admin_patterns("/media/delete$"),
+        # This URL kept around for legacy reasons, it is undesirable since it
+        # overlaps with the DeleteMediaByID servlet.
+        *admin_patterns("/media/(?P<server_name>[^/]*)/delete$"),
+    ]
 
     def __init__(self, hs: "HomeServer"):
         self.store = hs.get_datastores().main
@@ -287,35 +307,24 @@ class DeleteMediaByDateSize(RestServlet):
         self.media_repository = hs.get_media_repository()
 
     async def on_POST(
-        self, request: SynapseRequest, server_name: str
+        self, request: SynapseRequest, server_name: Optional[str] = None
     ) -> Tuple[int, JsonDict]:
         await assert_requester_is_admin(self.auth, request)
 
-        before_ts = parse_integer(request, "before_ts", required=True)
-        size_gt = parse_integer(request, "size_gt", default=0)
+        before_ts = parse_integer(request, "before_ts", required=True, negative=False)
+        size_gt = parse_integer(request, "size_gt", default=0, negative=False)
         keep_profiles = parse_boolean(request, "keep_profiles", default=True)
 
-        if before_ts < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter before_ts must be a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
-        elif before_ts < 30000000000:  # Dec 1970 in milliseconds, Aug 2920 in seconds
+        if before_ts < 30000000000:  # Dec 1970 in milliseconds, Aug 2920 in seconds
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST,
                 "Query parameter before_ts you provided is from the year 1970. "
                 + "Double check that you are providing a timestamp in milliseconds.",
                 errcode=Codes.INVALID_PARAM,
             )
-        if size_gt < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter size_gt must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
 
-        if self.server_name != server_name:
+        # This check is useless, we keep it for the legacy endpoint only.
+        if server_name is not None and self.server_name != server_name:
             raise SynapseError(HTTPStatus.BAD_REQUEST, "Can only delete local media")
 
         logging.info(
@@ -368,28 +377,14 @@ class UserMediaRestServlet(RestServlet):
         if user is None:
             raise NotFoundError("Unknown user")
 
-        start = parse_integer(request, "from", default=0)
-        limit = parse_integer(request, "limit", default=100)
-
-        if start < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter from must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
-
-        if limit < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter limit must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
+        start = parse_integer(request, "from", default=0, negative=False)
+        limit = parse_integer(request, "limit", default=100, negative=False)
 
         # If neither `order_by` nor `dir` is set, set the default order
         # to newest media is on top for backward compatibility.
         if b"order_by" not in request.args and b"dir" not in request.args:
             order_by = MediaSortOrder.CREATED_TS.value
-            direction = "b"
+            direction = Direction.BACKWARDS
         else:
             order_by = parse_string(
                 request,
@@ -397,15 +392,15 @@ class UserMediaRestServlet(RestServlet):
                 default=MediaSortOrder.CREATED_TS.value,
                 allowed_values=[sort_order.value for sort_order in MediaSortOrder],
             )
-            direction = parse_string(
-                request, "dir", default="f", allowed_values=("f", "b")
+            direction = parse_enum(
+                request, "dir", Direction, default=Direction.FORWARDS
             )
 
         media, total = await self.store.get_local_media_by_user_paginate(
             start, limit, user_id, order_by, direction
         )
 
-        ret = {"media": media, "total": total}
+        ret = {"media": [attr.asdict(m) for m in media], "total": total}
         if (start + limit) < total:
             ret["next_token"] = start + len(media)
 
@@ -426,28 +421,14 @@ class UserMediaRestServlet(RestServlet):
         if user is None:
             raise NotFoundError("Unknown user")
 
-        start = parse_integer(request, "from", default=0)
-        limit = parse_integer(request, "limit", default=100)
-
-        if start < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter from must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
-
-        if limit < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter limit must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
+        start = parse_integer(request, "from", default=0, negative=False)
+        limit = parse_integer(request, "limit", default=100, negative=False)
 
         # If neither `order_by` nor `dir` is set, set the default order
         # to newest media is on top for backward compatibility.
         if b"order_by" not in request.args and b"dir" not in request.args:
             order_by = MediaSortOrder.CREATED_TS.value
-            direction = "b"
+            direction = Direction.BACKWARDS
         else:
             order_by = parse_string(
                 request,
@@ -455,8 +436,8 @@ class UserMediaRestServlet(RestServlet):
                 default=MediaSortOrder.CREATED_TS.value,
                 allowed_values=[sort_order.value for sort_order in MediaSortOrder],
             )
-            direction = parse_string(
-                request, "dir", default="f", allowed_values=("f", "b")
+            direction = parse_enum(
+                request, "dir", Direction, default=Direction.FORWARDS
             )
 
         media, _ = await self.store.get_local_media_by_user_paginate(
@@ -464,7 +445,7 @@ class UserMediaRestServlet(RestServlet):
         )
 
         deleted_media, total = await self.media_repository.delete_local_media_ids(
-            [row["media_id"] for row in media]
+            [m.media_id for m in media]
         )
 
         return HTTPStatus.OK, {"deleted_media": deleted_media, "total": total}
@@ -482,6 +463,8 @@ def register_servlets_for_media_repo(hs: "HomeServer", http_server: HttpServer) 
     ProtectMediaByID(hs).register(http_server)
     UnprotectMediaByID(hs).register(http_server)
     ListMediaInRoom(hs).register(http_server)
-    DeleteMediaByID(hs).register(http_server)
+    # XXX DeleteMediaByDateSize must be registered before DeleteMediaByID as
+    #     their URL routes overlap.
     DeleteMediaByDateSize(hs).register(http_server)
+    DeleteMediaByID(hs).register(http_server)
     UserMediaRestServlet(hs).register(http_server)

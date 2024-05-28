@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014 - 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import (
@@ -21,11 +28,13 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Literal,
     Optional,
     Set,
     Tuple,
     TypeVar,
     Union,
+    overload,
 )
 
 import attr
@@ -44,8 +53,10 @@ from synapse.metrics import LaterGauge
 from synapse.streams.config import PaginationConfig
 from synapse.types import (
     JsonDict,
+    MultiWriterStreamToken,
     PersistedEventPosition,
     RoomStreamToken,
+    StrCollection,
     StreamKeyType,
     StreamToken,
     UserID,
@@ -103,7 +114,7 @@ class _NotifierUserStream:
     def __init__(
         self,
         user_id: str,
-        rooms: Collection[str],
+        rooms: StrCollection,
         current_token: StreamToken,
         time_now_ms: int,
     ):
@@ -125,8 +136,8 @@ class _NotifierUserStream:
 
     def notify(
         self,
-        stream_key: str,
-        stream_id: Union[int, RoomStreamToken],
+        stream_key: StreamKeyType,
+        stream_id: Union[int, RoomStreamToken, MultiWriterStreamToken],
         time_now_ms: int,
     ) -> None:
         """Notify any listeners for this user of a new event from an
@@ -226,13 +237,15 @@ class Notifier:
         self.store = hs.get_datastores().main
         self.pending_new_room_events: List[_PendingRoomEventEntry] = []
 
-        # Called when there are new things to stream over replication
-        self.replication_callbacks: List[Callable[[], None]] = []
+        self._replication_notifier = hs.get_replication_notifier()
         self._new_join_in_room_callbacks: List[Callable[[str, str], None]] = []
 
         self._federation_client = hs.get_federation_http_client()
 
-        self._third_party_rules = hs.get_third_party_event_rules()
+        self._third_party_rules = hs.get_module_api_callbacks().third_party_event_rules
+
+        # List of callbacks to be notified when a lock is released
+        self._lock_released_callback: List[Callable[[str, str, str], None]] = []
 
         self.clock = hs.get_clock()
         self.appservice_handler = hs.get_application_service_handler()
@@ -279,7 +292,7 @@ class Notifier:
         it needs to do any asynchronous work, a background thread should be started and
         wrapped with run_as_background_process.
         """
-        self.replication_callbacks.append(cb)
+        self._replication_notifier.add_replication_callback(cb)
 
     def add_new_join_in_room_callback(self, cb: Callable[[str, str], None]) -> None:
         """Add a callback that will be called when a user joins a room.
@@ -314,6 +327,32 @@ class Notifier:
             )
             event_entries.append((entry, event.event_id))
         await self.notify_new_room_events(event_entries, max_room_stream_token)
+
+    async def on_un_partial_stated_room(
+        self,
+        room_id: str,
+        new_token: int,
+    ) -> None:
+        """Used by the resync background processes to wake up all listeners
+        of this room when it is un-partial-stated.
+
+        It will also notify replication listeners of the change in stream.
+        """
+
+        # Wake up all related user stream notifiers
+        user_streams = self.room_to_user_streams.get(room_id, set())
+        time_now_ms = self.clock.time_msec()
+        for user_stream in user_streams:
+            try:
+                user_stream.notify(
+                    StreamKeyType.UN_PARTIAL_STATED_ROOMS, new_token, time_now_ms
+                )
+            except Exception:
+                logger.exception("Failed to notify listener")
+
+        # Poke the replication so that other workers also see the write to
+        # the un-partial-stated rooms stream.
+        self.notify_replication()
 
     async def notify_new_room_events(
         self,
@@ -423,12 +462,47 @@ class Notifier:
         except Exception:
             logger.exception("Error pusher pool of event")
 
+    @overload
     def on_new_event(
         self,
-        stream_key: str,
-        new_token: Union[int, RoomStreamToken],
+        stream_key: Literal[StreamKeyType.ROOM],
+        new_token: RoomStreamToken,
         users: Optional[Collection[Union[str, UserID]]] = None,
-        rooms: Optional[Collection[str]] = None,
+        rooms: Optional[StrCollection] = None,
+    ) -> None: ...
+
+    @overload
+    def on_new_event(
+        self,
+        stream_key: Literal[StreamKeyType.RECEIPT],
+        new_token: MultiWriterStreamToken,
+        users: Optional[Collection[Union[str, UserID]]] = None,
+        rooms: Optional[StrCollection] = None,
+    ) -> None: ...
+
+    @overload
+    def on_new_event(
+        self,
+        stream_key: Literal[
+            StreamKeyType.ACCOUNT_DATA,
+            StreamKeyType.DEVICE_LIST,
+            StreamKeyType.PRESENCE,
+            StreamKeyType.PUSH_RULES,
+            StreamKeyType.TO_DEVICE,
+            StreamKeyType.TYPING,
+            StreamKeyType.UN_PARTIAL_STATED_ROOMS,
+        ],
+        new_token: int,
+        users: Optional[Collection[Union[str, UserID]]] = None,
+        rooms: Optional[StrCollection] = None,
+    ) -> None: ...
+
+    def on_new_event(
+        self,
+        stream_key: StreamKeyType,
+        new_token: Union[int, RoomStreamToken, MultiWriterStreamToken],
+        users: Optional[Collection[Union[str, UserID]]] = None,
+        rooms: Optional[StrCollection] = None,
     ) -> None:
         """Used to inform listeners that something has happened event wise.
 
@@ -500,7 +574,7 @@ class Notifier:
         user_id: str,
         timeout: int,
         callback: Callable[[StreamToken, StreamToken], Awaitable[T]],
-        room_ids: Optional[Collection[str]] = None,
+        room_ids: Optional[StrCollection] = None,
         from_token: StreamToken = StreamToken.START,
     ) -> T:
         """Wait until the callback returns a non empty response or the
@@ -626,30 +700,30 @@ class Notifier:
             events: List[Union[JsonDict, EventBase]] = []
             end_token = from_token
 
-            for name, source in self.event_sources.sources.get_sources():
-                keyname = "%s_key" % name
-                before_id = getattr(before_token, keyname)
-                after_id = getattr(after_token, keyname)
+            for keyname, source in self.event_sources.sources.get_sources():
+                before_id = before_token.get_field(keyname)
+                after_id = after_token.get_field(keyname)
                 if before_id == after_id:
                     continue
 
                 new_events, new_key = await source.get_new_events(
                     user=user,
-                    from_key=getattr(from_token, keyname),
+                    from_key=from_token.get_field(keyname),
                     limit=limit,
                     is_guest=is_peeking,
                     room_ids=room_ids,
                     explicit_room_id=explicit_room_id,
                 )
 
-                if name == "room":
+                if keyname == StreamKeyType.ROOM:
                     new_events = await filter_events_for_client(
                         self._storage_controllers,
                         user.to_string(),
                         new_events,
                         is_peeking=is_peeking,
+                        msc4115_membership_on_events=self.hs.config.experimental.msc4115_membership_on_events,
                     )
-                elif name == "presence":
+                elif keyname == StreamKeyType.PRESENCE:
                     now = self.clock.time_msec()
                     new_events[:] = [
                         {
@@ -691,7 +765,7 @@ class Notifier:
 
     async def _get_room_ids(
         self, user: UserID, explicit_room_id: Optional[str]
-    ) -> Tuple[Collection[str], bool]:
+    ) -> Tuple[StrCollection, bool]:
         joined_room_ids = await self.store.get_rooms_for_user(user.to_string())
         if explicit_room_id:
             if explicit_room_id in joined_room_ids:
@@ -741,8 +815,7 @@ class Notifier:
 
     def notify_replication(self) -> None:
         """Notify the any replication listeners that there's a new event"""
-        for cb in self.replication_callbacks:
-            cb()
+        self._replication_notifier.notify_replication()
 
     def notify_user_joined_room(self, event_id: str, room_id: str) -> None:
         for cb in self._new_join_in_room_callbacks:
@@ -759,3 +832,39 @@ class Notifier:
         # Tell the federation client about the fact the server is back up, so
         # that any in flight requests can be immediately retried.
         self._federation_client.wake_destination(server)
+
+    def add_lock_released_callback(
+        self, callback: Callable[[str, str, str], None]
+    ) -> None:
+        """Add a function to be called whenever we are notified about a released lock."""
+        self._lock_released_callback.append(callback)
+
+    def notify_lock_released(
+        self, instance_name: str, lock_name: str, lock_key: str
+    ) -> None:
+        """Notify the callbacks that a lock has been released."""
+        for cb in self._lock_released_callback:
+            cb(instance_name, lock_name, lock_key)
+
+
+@attr.s(auto_attribs=True)
+class ReplicationNotifier:
+    """Tracks callbacks for things that need to know about stream changes.
+
+    This is separate from the notifier to avoid circular dependencies.
+    """
+
+    _replication_callbacks: List[Callable[[], None]] = attr.Factory(list)
+
+    def add_replication_callback(self, cb: Callable[[], None]) -> None:
+        """Add a callback that will be called when some new data is available.
+        Callback is not given any arguments. It should *not* return a Deferred - if
+        it needs to do any asynchronous work, a background thread should be started and
+        wrapped with run_as_background_process.
+        """
+        self._replication_callbacks.append(cb)
+
+    def notify_replication(self) -> None:
+        """Notify the any replication listeners that there's a new event"""
+        for cb in self._replication_callbacks:
+            cb()

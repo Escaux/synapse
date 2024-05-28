@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from typing import TYPE_CHECKING, Mapping
 
@@ -19,6 +26,7 @@ from twisted.web.resource import Resource
 from synapse.rest.synapse.client.new_user_consent import NewUserConsentResource
 from synapse.rest.synapse.client.pick_idp import PickIdpResource
 from synapse.rest.synapse.client.pick_username import pick_username_resource
+from synapse.rest.synapse.client.rendezvous import MSC4108RendezvousSessionResource
 from synapse.rest.synapse.client.sso_register import SsoRegisterResource
 from synapse.rest.synapse.client.unsubscribe import UnsubscribeResource
 
@@ -46,6 +54,12 @@ def build_synapse_client_resource_tree(hs: "HomeServer") -> Mapping[str, Resourc
         "/_synapse/client/unsubscribe": UnsubscribeResource(hs),
     }
 
+    # Expose the JWKS endpoint if OAuth2 delegation is enabled
+    if hs.config.experimental.msc3861.enabled:
+        from synapse.rest.synapse.client.jwks import JwksResource
+
+        resources["/_synapse/jwks"] = JwksResource(hs)
+
     # provider-specific SSO bits. Only load these if they are enabled, since they
     # rely on optional dependencies.
     if hs.config.oidc.oidc_enabled:
@@ -62,6 +76,9 @@ def build_synapse_client_resource_tree(hs: "HomeServer") -> Mapping[str, Resourc
         # This is also mounted under '/_matrix' for backwards-compatibility.
         # To be removed in Synapse v1.32.0.
         resources["/_matrix/saml2"] = res
+
+    if hs.config.experimental.msc4108_enabled:
+        resources["/_synapse/client/rendezvous"] = MSC4108RendezvousSessionResource(hs)
 
     return resources
 

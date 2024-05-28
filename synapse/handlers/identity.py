@@ -1,23 +1,31 @@
-# Copyright 2015, 2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2017 Vector Creations Ltd
-# Copyright 2018 New Vector Ltd
+# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """Utilities for interacting with Identity Servers"""
 import logging
 import urllib.parse
 from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Tuple
+
+import attr
 
 from synapse.api.errors import (
     CodeMessageException,
@@ -52,10 +60,10 @@ class IdentityHandler:
         # An HTTP client for contacting trusted URLs.
         self.http_client = SimpleHttpClient(hs)
         # An HTTP client for contacting identity servers specified by clients.
-        self.blacklisting_http_client = SimpleHttpClient(
+        self._http_client = SimpleHttpClient(
             hs,
-            ip_blacklist=hs.config.server.federation_ip_range_blacklist,
-            ip_whitelist=hs.config.server.federation_ip_range_whitelist,
+            ip_blocklist=hs.config.server.federation_ip_range_blocklist,
+            ip_allowlist=hs.config.server.federation_ip_range_allowlist,
         )
         self.federation_http_client = hs.get_federation_http_client()
         self.hs = hs
@@ -66,14 +74,12 @@ class IdentityHandler:
         self._3pid_validation_ratelimiter_ip = Ratelimiter(
             store=self.store,
             clock=hs.get_clock(),
-            rate_hz=hs.config.ratelimiting.rc_3pid_validation.per_second,
-            burst_count=hs.config.ratelimiting.rc_3pid_validation.burst_count,
+            cfg=hs.config.ratelimiting.rc_3pid_validation,
         )
         self._3pid_validation_ratelimiter_address = Ratelimiter(
             store=self.store,
             clock=hs.get_clock(),
-            rate_hz=hs.config.ratelimiting.rc_3pid_validation.per_second,
-            burst_count=hs.config.ratelimiting.rc_3pid_validation.burst_count,
+            cfg=hs.config.ratelimiting.rc_3pid_validation,
         )
 
     async def ratelimit_request_token_requests(
@@ -197,7 +203,7 @@ class IdentityHandler:
         try:
             # Use the blacklisting http client as this call is only to identity servers
             # provided by a client
-            data = await self.blacklisting_http_client.post_json_get_json(
+            data = await self._http_client.post_json_get_json(
                 bind_url, bind_data, headers=headers
             )
 
@@ -219,28 +225,31 @@ class IdentityHandler:
             data = json_decoder.decode(e.msg)  # XXX WAT?
             return data
 
-    async def try_unbind_threepid(self, mxid: str, threepid: dict) -> bool:
-        """Attempt to remove a 3PID from an identity server, or if one is not provided, all
-        identity servers we're aware the binding is present on
+    async def try_unbind_threepid(
+        self, mxid: str, medium: str, address: str, id_server: Optional[str]
+    ) -> bool:
+        """Attempt to remove a 3PID from one or more identity servers.
 
         Args:
             mxid: Matrix user ID of binding to be removed
-            threepid: Dict with medium & address of binding to be
-                removed, and an optional id_server.
+            medium: The medium of the third-party ID.
+            address: The address of the third-party ID.
+            id_server: An identity server to attempt to unbind from. If None,
+                attempt to remove the association from all identity servers
+                known to potentially have it.
 
         Raises:
-            SynapseError: If we failed to contact the identity server
+            SynapseError: If we failed to contact one or more identity servers.
 
         Returns:
-            True on success, otherwise False if the identity
-            server doesn't support unbinding (or no identity server found to
-            contact).
+            True on success, otherwise False if the identity server doesn't
+            support unbinding (or no identity server to contact was found).
         """
-        if threepid.get("id_server"):
-            id_servers = [threepid["id_server"]]
+        if id_server:
+            id_servers = [id_server]
         else:
             id_servers = await self.store.get_id_servers_user_bound(
-                user_id=mxid, medium=threepid["medium"], address=threepid["address"]
+                mxid, medium, address
             )
 
         # We don't know where to unbind, so we don't have a choice but to return
@@ -249,20 +258,21 @@ class IdentityHandler:
 
         changed = True
         for id_server in id_servers:
-            changed &= await self.try_unbind_threepid_with_id_server(
-                mxid, threepid, id_server
+            changed &= await self._try_unbind_threepid_with_id_server(
+                mxid, medium, address, id_server
             )
 
         return changed
 
-    async def try_unbind_threepid_with_id_server(
-        self, mxid: str, threepid: dict, id_server: str
+    async def _try_unbind_threepid_with_id_server(
+        self, mxid: str, medium: str, address: str, id_server: str
     ) -> bool:
         """Removes a binding from an identity server
 
         Args:
             mxid: Matrix user ID of binding to be removed
-            threepid: Dict with medium & address of binding to be removed
+            medium: The medium of the third-party ID
+            address: The address of the third-party ID
             id_server: Identity server to unbind from
 
         Raises:
@@ -286,7 +296,7 @@ class IdentityHandler:
 
         content = {
             "mxid": mxid,
-            "threepid": {"medium": threepid["medium"], "address": threepid["address"]},
+            "threepid": {"medium": medium, "address": address},
         }
 
         # we abuse the federation http client to sign the request, but we have to send it
@@ -304,9 +314,7 @@ class IdentityHandler:
         try:
             # Use the blacklisting http client as this call is only to identity servers
             # provided by a client
-            await self.blacklisting_http_client.post_json_get_json(
-                url, content, headers
-            )
+            await self._http_client.post_json_get_json(url, content, headers)
             changed = True
         except HttpResponseException as e:
             changed = False
@@ -319,12 +327,7 @@ class IdentityHandler:
         except RequestTimedOutError:
             raise SynapseError(500, "Timed out contacting identity server")
 
-        await self.store.remove_user_bound_threepid(
-            user_id=mxid,
-            medium=threepid["medium"],
-            address=threepid["address"],
-            id_server=id_server,
-        )
+        await self.store.remove_user_bound_threepid(mxid, medium, address, id_server)
 
         return changed
 
@@ -362,9 +365,9 @@ class IdentityHandler:
 
         # Check to see if a session already exists and that it is not yet
         # marked as validated
-        if session and session.get("validated_at") is None:
-            session_id = session["session_id"]
-            last_send_attempt = session["last_send_attempt"]
+        if session and session.validated_at is None:
+            session_id = session.session_id
+            last_send_attempt = session.last_send_attempt
 
             # Check that the send_attempt is higher than previous attempts
             if send_attempt <= last_send_attempt:
@@ -485,7 +488,6 @@ class IdentityHandler:
 
         # We don't actually know which medium this 3PID is. Thus we first assume it's email,
         # and if validation fails we try msisdn
-        validation_session = None
 
         # Try to validate as email
         if self.hs.config.email.can_verify_email:
@@ -493,19 +495,18 @@ class IdentityHandler:
             validation_session = await self.store.get_threepid_validation_session(
                 "email", client_secret, sid=sid, validated=True
             )
-
-        if validation_session:
-            return validation_session
+            if validation_session:
+                return attr.asdict(validation_session)
 
         # Try to validate as msisdn
         if self.hs.config.registration.account_threepid_delegate_msisdn:
             # Ask our delegated msisdn identity server
-            validation_session = await self.threepid_from_creds(
+            return await self.threepid_from_creds(
                 self.hs.config.registration.account_threepid_delegate_msisdn,
                 threepid_creds,
             )
 
-        return validation_session
+        return None
 
     async def proxy_msisdn_submit_token(
         self, id_server: str, client_secret: str, sid: str, token: str
@@ -580,7 +581,7 @@ class IdentityHandler:
         """
         # Check what hashing details are supported by this identity server
         try:
-            hash_details = await self.blacklisting_http_client.get_json(
+            hash_details = await self._http_client.get_json(
                 "%s%s/_matrix/identity/v2/hash_details" % (id_server_scheme, id_server),
                 {"access_token": id_access_token},
             )
@@ -647,7 +648,7 @@ class IdentityHandler:
         headers = {"Authorization": create_id_access_token_header(id_access_token)}
 
         try:
-            lookup_results = await self.blacklisting_http_client.post_json_get_json(
+            lookup_results = await self._http_client.post_json_get_json(
                 "%s%s/_matrix/identity/v2/lookup" % (id_server_scheme, id_server),
                 {
                     "addresses": [lookup_value],
@@ -753,7 +754,7 @@ class IdentityHandler:
 
         url = "%s%s/_matrix/identity/v2/store-invite" % (id_server_scheme, id_server)
         try:
-            data = await self.blacklisting_http_client.post_json_get_json(
+            data = await self._http_client.post_json_get_json(
                 url,
                 invite_config,
                 {"Authorization": create_id_access_token_header(id_access_token)},

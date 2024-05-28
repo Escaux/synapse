@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2021 Callum Brown
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 import string
@@ -77,7 +84,18 @@ class ListRegistrationTokensRestServlet(RestServlet):
         await assert_requester_is_admin(self.auth, request)
         valid = parse_boolean(request, "valid")
         token_list = await self.store.get_registration_tokens(valid)
-        return HTTPStatus.OK, {"registration_tokens": token_list}
+        return HTTPStatus.OK, {
+            "registration_tokens": [
+                {
+                    "token": t[0],
+                    "uses_allowed": t[1],
+                    "pending": t[2],
+                    "completed": t[3],
+                    "expiry_time": t[4],
+                }
+                for t in token_list
+            ]
+        }
 
 
 class NewRegistrationTokenRestServlet(RestServlet):
@@ -143,7 +161,7 @@ class NewRegistrationTokenRestServlet(RestServlet):
         else:
             # Get length of token to generate (default is 16)
             length = body.get("length", 16)
-            if not isinstance(length, int):
+            if type(length) is not int:  # noqa: E721
                 raise SynapseError(
                     HTTPStatus.BAD_REQUEST,
                     "length must be an integer",
@@ -164,7 +182,7 @@ class NewRegistrationTokenRestServlet(RestServlet):
         uses_allowed = body.get("uses_allowed", None)
         if not (
             uses_allowed is None
-            or (isinstance(uses_allowed, int) and uses_allowed >= 0)
+            or (type(uses_allowed) is int and uses_allowed >= 0)  # noqa: E721
         ):
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST,
@@ -173,13 +191,16 @@ class NewRegistrationTokenRestServlet(RestServlet):
             )
 
         expiry_time = body.get("expiry_time", None)
-        if not isinstance(expiry_time, (int, type(None))):
+        if expiry_time is not None and type(expiry_time) is not int:  # noqa: E721
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST,
                 "expiry_time must be an integer or null",
                 Codes.INVALID_PARAM,
             )
-        if isinstance(expiry_time, int) and expiry_time < self.clock.time_msec():
+        if (
+            type(expiry_time) is int  # noqa: E721
+            and expiry_time < self.clock.time_msec()
+        ):
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST,
                 "expiry_time must not be in the past",
@@ -284,7 +305,7 @@ class RegistrationTokenRestServlet(RestServlet):
             uses_allowed = body["uses_allowed"]
             if not (
                 uses_allowed is None
-                or (isinstance(uses_allowed, int) and uses_allowed >= 0)
+                or (type(uses_allowed) is int and uses_allowed >= 0)  # noqa: E721
             ):
                 raise SynapseError(
                     HTTPStatus.BAD_REQUEST,
@@ -295,13 +316,16 @@ class RegistrationTokenRestServlet(RestServlet):
 
         if "expiry_time" in body:
             expiry_time = body["expiry_time"]
-            if not isinstance(expiry_time, (int, type(None))):
+            if expiry_time is not None and type(expiry_time) is not int:  # noqa: E721
                 raise SynapseError(
                     HTTPStatus.BAD_REQUEST,
                     "expiry_time must be an integer or null",
                     Codes.INVALID_PARAM,
                 )
-            if isinstance(expiry_time, int) and expiry_time < self.clock.time_msec():
+            if (
+                type(expiry_time) is int  # noqa: E721
+                and expiry_time < self.clock.time_msec()
+            ):
                 raise SynapseError(
                     HTTPStatus.BAD_REQUEST,
                     "expiry_time must not be in the past",

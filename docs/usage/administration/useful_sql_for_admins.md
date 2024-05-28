@@ -193,7 +193,7 @@ SELECT rss.room_id, rss.name, rss.canonical_alias, rss.topic, rss.encryption,
     rsc.joined_members, rsc.local_users_in_room, rss.join_rules
   FROM room_stats_state rss
   LEFT JOIN room_stats_current rsc USING (room_id)
-  WHERE room_id IN ( WHERE room_id IN (
+  WHERE room_id IN (
     '!OGEhHVWSdvArJzumhm:matrix.org',
     '!YTvKGNlinIzlkMTVRl:matrix.org' 
   );
@@ -204,4 +204,13 @@ SELECT rss.room_id, rss.name, rss.canonical_alias, rss.topic, rss.encryption,
 SELECT user_id, device_id, user_agent, TO_TIMESTAMP(last_seen / 1000) AS "last_seen"
   FROM devices
   WHERE last_seen < DATE_PART('epoch', NOW() - INTERVAL '3 month') * 1000;
+```
+
+## Clear the cache of a remote user's device list
+
+Forces the resync of a remote user's device list - if you have somehow cached a bad state, and the remote server is
+will not send out a device list update.
+```sql
+INSERT INTO device_lists_remote_resync
+VALUES ('USER_ID', (EXTRACT(epoch FROM NOW()) * 1000)::BIGINT);
 ```

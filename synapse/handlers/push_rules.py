@@ -1,24 +1,32 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from typing import TYPE_CHECKING, List, Optional, Union
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import attr
 
 from synapse.api.errors import SynapseError, UnrecognizedRequestError
+from synapse.push.clientformat import format_push_rules_for_user
 from synapse.storage.push_rule import RuleNotFoundException
 from synapse.synapse_rust.push import get_base_rule_ids
-from synapse.types import JsonDict
+from synapse.types import JsonDict, StreamKeyType, UserID
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -113,7 +121,20 @@ class PushRulesHandler:
             user_id: the user ID the change is for.
         """
         stream_id = self._main_store.get_max_push_rules_stream_id()
-        self._notifier.on_new_event("push_rules_key", stream_id, users=[user_id])
+        self._notifier.on_new_event(
+            StreamKeyType.PUSH_RULES, stream_id, users=[user_id]
+        )
+
+    async def push_rules_for_user(
+        self, user: UserID
+    ) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
+        """
+        Push rules aren't really account data, but get formatted as such for /sync.
+        """
+        user_id = user.to_string()
+        rules_raw = await self._main_store.get_push_rules_for_user(user_id)
+        rules = format_push_rules_for_user(user, rules_raw)
+        return rules
 
 
 def check_actions(actions: List[Union[str, JsonDict]]) -> None:
@@ -129,6 +150,8 @@ def check_actions(actions: List[Union[str, JsonDict]]) -> None:
         raise InvalidRuleException("No actions found")
 
     for a in actions:
+        # "dont_notify" and "coalesce" are legacy actions. They are allowed, but
+        # ignored (resulting in no action from the pusher).
         if a in ["notify", "dont_notify", "coalesce"]:
             pass
         elif isinstance(a, dict) and "set_tweak" in a:

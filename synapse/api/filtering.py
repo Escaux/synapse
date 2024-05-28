@@ -1,19 +1,25 @@
-# Copyright 2015, 2016 OpenMarket Ltd
-# Copyright 2017 Vector Creations Ltd
-# Copyright 2018-2019 New Vector Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019-2021 The Matrix.org Foundation C.I.C.
+# Copyright 2017 Vector Creations Ltd
+# Copyright 2015, 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import json
 from typing import (
     TYPE_CHECKING,
@@ -37,7 +43,7 @@ from synapse.api.constants import EduTypes, EventContentFields
 from synapse.api.errors import SynapseError
 from synapse.api.presence import UserPresenceState
 from synapse.events import EventBase, relation_from_event
-from synapse.types import JsonDict, RoomID, UserID
+from synapse.types import JsonDict, JsonMapping, RoomID, UserID
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -128,20 +134,7 @@ USER_FILTER_SCHEMA = {
         "account_data": {"$ref": "#/definitions/filter"},
         "room": {"$ref": "#/definitions/room_filter"},
         "event_format": {"type": "string", "enum": ["client", "federation"]},
-        "event_fields": {
-            "type": "array",
-            "items": {
-                "type": "string",
-                # Don't allow '\\' in event field filters. This makes matching
-                # events a lot easier as we can then use a negative lookbehind
-                # assertion to split '\.' If we allowed \\ then it would
-                # incorrectly split '\\.' See synapse.events.utils.serialize_event
-                #
-                # Note that because this is a regular expression, we have to escape
-                # each backslash in the pattern.
-                "pattern": r"^((?!\\\\).)*$",
-            },
-        },
+        "event_fields": {"type": "array", "items": {"type": "string"}},
     },
     "additionalProperties": True,  # Allow new fields for forward compatibility
 }
@@ -165,16 +158,14 @@ class Filtering:
         self.DEFAULT_FILTER_COLLECTION = FilterCollection(hs, {})
 
     async def get_user_filter(
-        self, user_localpart: str, filter_id: Union[int, str]
+        self, user_id: UserID, filter_id: Union[int, str]
     ) -> "FilterCollection":
-        result = await self.store.get_user_filter(user_localpart, filter_id)
+        result = await self.store.get_user_filter(user_id, filter_id)
         return FilterCollection(self._hs, result)
 
-    def add_user_filter(
-        self, user_localpart: str, user_filter: JsonDict
-    ) -> Awaitable[int]:
+    def add_user_filter(self, user_id: UserID, user_filter: JsonDict) -> Awaitable[int]:
         self.check_valid_filter(user_filter)
-        return self.store.add_user_filter(user_localpart, user_filter)
+        return self.store.add_user_filter(user_id, user_filter)
 
     # TODO(paul): surely we should probably add a delete_user_filter or
     #   replace_user_filter at some point? There's no REST API specified for
@@ -206,7 +197,7 @@ FilterEvent = TypeVar("FilterEvent", EventBase, UserPresenceState, JsonDict)
 
 
 class FilterCollection:
-    def __init__(self, hs: "HomeServer", filter_json: JsonDict):
+    def __init__(self, hs: "HomeServer", filter_json: JsonMapping):
         self._filter_json = filter_json
 
         room_filter_json = self._filter_json.get("room", {})
@@ -219,9 +210,13 @@ class FilterCollection:
         self._room_timeline_filter = Filter(hs, room_filter_json.get("timeline", {}))
         self._room_state_filter = Filter(hs, room_filter_json.get("state", {}))
         self._room_ephemeral_filter = Filter(hs, room_filter_json.get("ephemeral", {}))
-        self._room_account_data = Filter(hs, room_filter_json.get("account_data", {}))
+        self._room_account_data_filter = Filter(
+            hs, room_filter_json.get("account_data", {})
+        )
         self._presence_filter = Filter(hs, filter_json.get("presence", {}))
-        self._account_data = Filter(hs, filter_json.get("account_data", {}))
+        self._global_account_data_filter = Filter(
+            hs, filter_json.get("account_data", {})
+        )
 
         self.include_leave = filter_json.get("room", {}).get("include_leave", False)
         self.event_fields = filter_json.get("event_fields", [])
@@ -230,7 +225,7 @@ class FilterCollection:
     def __repr__(self) -> str:
         return "<FilterCollection %s>" % (json.dumps(self._filter_json),)
 
-    def get_filter_json(self) -> JsonDict:
+    def get_filter_json(self) -> JsonMapping:
         return self._filter_json
 
     def timeline_limit(self) -> int:
@@ -252,12 +247,14 @@ class FilterCollection:
         return self._room_timeline_filter.unread_thread_notifications
 
     async def filter_presence(
-        self, events: Iterable[UserPresenceState]
+        self, presence_states: Iterable[UserPresenceState]
     ) -> List[UserPresenceState]:
-        return await self._presence_filter.filter(events)
+        return await self._presence_filter.filter(presence_states)
 
-    async def filter_account_data(self, events: Iterable[JsonDict]) -> List[JsonDict]:
-        return await self._account_data.filter(events)
+    async def filter_global_account_data(
+        self, events: Iterable[JsonDict]
+    ) -> List[JsonDict]:
+        return await self._global_account_data_filter.filter(events)
 
     async def filter_room_state(self, events: Iterable[EventBase]) -> List[EventBase]:
         return await self._room_state_filter.filter(
@@ -279,9 +276,12 @@ class FilterCollection:
     async def filter_room_account_data(
         self, events: Iterable[JsonDict]
     ) -> List[JsonDict]:
-        return await self._room_account_data.filter(
+        return await self._room_account_data_filter.filter(
             await self._room_filter.filter(events)
         )
+
+    def blocks_all_rooms(self) -> bool:
+        return self._room_filter.filters_all_rooms()
 
     def blocks_all_presence(self) -> bool:
         return (
@@ -289,11 +289,25 @@ class FilterCollection:
             or self._presence_filter.filters_all_senders()
         )
 
+    def blocks_all_global_account_data(self) -> bool:
+        """True if all global acount data will be filtered out."""
+        return (
+            self._global_account_data_filter.filters_all_types()
+            or self._global_account_data_filter.filters_all_senders()
+        )
+
     def blocks_all_room_ephemeral(self) -> bool:
         return (
             self._room_ephemeral_filter.filters_all_types()
             or self._room_ephemeral_filter.filters_all_senders()
             or self._room_ephemeral_filter.filters_all_rooms()
+        )
+
+    def blocks_all_room_account_data(self) -> bool:
+        return (
+            self._room_account_data_filter.filters_all_types()
+            or self._room_account_data_filter.filters_all_senders()
+            or self._room_account_data_filter.filters_all_rooms()
         )
 
     def blocks_all_room_timeline(self) -> bool:
@@ -305,7 +319,7 @@ class FilterCollection:
 
 
 class Filter:
-    def __init__(self, hs: "HomeServer", filter_json: JsonDict):
+    def __init__(self, hs: "HomeServer", filter_json: JsonMapping):
         self._hs = hs
         self._store = hs.get_datastores().main
         self.filter_json = filter_json

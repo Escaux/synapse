@@ -1,22 +1,28 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2018-2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
-from synapse.api.errors import SynapseError
-from synapse.handlers.room_member import RoomMemberHandler
+from synapse.handlers.room_member import NoKnownServersError, RoomMemberHandler
 from synapse.replication.http.membership import (
     ReplicationRemoteJoinRestServlet as ReplRemoteJoin,
     ReplicationRemoteKnockRestServlet as ReplRemoteKnock,
@@ -52,7 +58,7 @@ class RoomMemberWorkerHandler(RoomMemberHandler):
     ) -> Tuple[str, int]:
         """Implements RoomMemberHandler._remote_join"""
         if len(remote_room_hosts) == 0:
-            raise SynapseError(404, "No known servers")
+            raise NoKnownServersError()
 
         ret = await self._remote_join_client(
             requester=requester,
@@ -114,6 +120,7 @@ class RoomMemberWorkerHandler(RoomMemberHandler):
 
     async def remote_knock(
         self,
+        requester: Requester,
         remote_room_hosts: List[str],
         room_id: str,
         user: UserID,
@@ -124,9 +131,10 @@ class RoomMemberWorkerHandler(RoomMemberHandler):
         Implements RoomMemberHandler.remote_knock
         """
         ret = await self._remote_knock_client(
+            requester=requester,
             remote_room_hosts=remote_room_hosts,
             room_id=room_id,
-            user=user,
+            user_id=user.to_string(),
             content=content,
         )
         return ret["event_id"], ret["stream_id"]
@@ -136,6 +144,3 @@ class RoomMemberWorkerHandler(RoomMemberHandler):
         await self._notify_change_client(
             user_id=target.to_string(), room_id=room_id, change="left"
         )
-
-    async def forget(self, target: UserID, room_id: str) -> None:
-        raise RuntimeError("Cannot forget rooms on workers.")

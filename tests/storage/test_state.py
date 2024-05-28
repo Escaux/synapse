@@ -1,20 +1,28 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2018-2021 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 import logging
+from typing import List, Tuple, cast
 
-from frozendict import frozendict
+from immutabledict import immutabledict
 
 from twisted.test.proto_helpers import MemoryReactor
 
@@ -67,9 +75,11 @@ class StateStoreTestCase(HomeserverTestCase):
             },
         )
 
-        event, context = self.get_success(
+        event, unpersisted_context = self.get_success(
             self.event_creation_handler.create_new_client_event(builder)
         )
+
+        context = self.get_success(unpersisted_context.persist(event))
 
         assert self.storage.persistence is not None
         self.get_success(self.storage.persistence.persist_event(event, context))
@@ -196,7 +206,7 @@ class StateStoreTestCase(HomeserverTestCase):
             self.storage.state.get_state_for_event(
                 e5.event_id,
                 state_filter=StateFilter(
-                    types=frozendict(
+                    types=immutabledict(
                         {EventTypes.Member: frozenset({self.u_alice.to_string()})}
                     ),
                     include_others=True,
@@ -218,7 +228,7 @@ class StateStoreTestCase(HomeserverTestCase):
             self.storage.state.get_state_for_event(
                 e5.event_id,
                 state_filter=StateFilter(
-                    types=frozendict({EventTypes.Member: frozenset()}),
+                    types=immutabledict({EventTypes.Member: frozenset()}),
                     include_others=True,
                 ),
             )
@@ -240,11 +250,12 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # test _get_state_for_group_using_cache correctly filters out members
         # with types=[]
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset()}), include_others=True
+                types=immutabledict({EventTypes.Member: frozenset()}),
+                include_others=True,
             ),
         )
 
@@ -257,11 +268,12 @@ class StateStoreTestCase(HomeserverTestCase):
             state_dict,
         )
 
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset()}), include_others=True
+                types=immutabledict({EventTypes.Member: frozenset()}),
+                include_others=True,
             ),
         )
 
@@ -270,11 +282,11 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with wildcard types
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: None}), include_others=True
+                types=immutabledict({EventTypes.Member: None}), include_others=True
             ),
         )
 
@@ -287,11 +299,11 @@ class StateStoreTestCase(HomeserverTestCase):
             state_dict,
         )
 
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: None}), include_others=True
+                types=immutabledict({EventTypes.Member: None}), include_others=True
             ),
         )
 
@@ -307,11 +319,11 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with specific types
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                types=immutabledict({EventTypes.Member: frozenset({e5.state_key})}),
                 include_others=True,
             ),
         )
@@ -325,11 +337,11 @@ class StateStoreTestCase(HomeserverTestCase):
             state_dict,
         )
 
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                types=immutabledict({EventTypes.Member: frozenset({e5.state_key})}),
                 include_others=True,
             ),
         )
@@ -339,11 +351,11 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with specific types
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                types=immutabledict({EventTypes.Member: frozenset({e5.state_key})}),
                 include_others=False,
             ),
         )
@@ -390,11 +402,12 @@ class StateStoreTestCase(HomeserverTestCase):
         # test _get_state_for_group_using_cache correctly filters out members
         # with types=[]
         room_id = self.room.to_string()
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset()}), include_others=True
+                types=immutabledict({EventTypes.Member: frozenset()}),
+                include_others=True,
             ),
         )
 
@@ -402,11 +415,12 @@ class StateStoreTestCase(HomeserverTestCase):
         self.assertDictEqual({}, state_dict)
 
         room_id = self.room.to_string()
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset()}), include_others=True
+                types=immutabledict({EventTypes.Member: frozenset()}),
+                include_others=True,
             ),
         )
 
@@ -415,22 +429,22 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # wildcard types
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: None}), include_others=True
+                types=immutabledict({EventTypes.Member: None}), include_others=True
             ),
         )
 
         self.assertEqual(is_all, False)
         self.assertDictEqual({}, state_dict)
 
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: None}), include_others=True
+                types=immutabledict({EventTypes.Member: None}), include_others=True
             ),
         )
 
@@ -445,11 +459,11 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with specific types
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                types=immutabledict({EventTypes.Member: frozenset({e5.state_key})}),
                 include_others=True,
             ),
         )
@@ -457,11 +471,11 @@ class StateStoreTestCase(HomeserverTestCase):
         self.assertEqual(is_all, False)
         self.assertDictEqual({}, state_dict)
 
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                types=immutabledict({EventTypes.Member: frozenset({e5.state_key})}),
                 include_others=True,
             ),
         )
@@ -471,11 +485,11 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with specific types
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                types=immutabledict({EventTypes.Member: frozenset({e5.state_key})}),
                 include_others=False,
             ),
         )
@@ -483,14 +497,149 @@ class StateStoreTestCase(HomeserverTestCase):
         self.assertEqual(is_all, False)
         self.assertDictEqual({}, state_dict)
 
-        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
+        state_dict, is_all = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                types=immutabledict({EventTypes.Member: frozenset({e5.state_key})}),
                 include_others=False,
             ),
         )
 
         self.assertEqual(is_all, True)
         self.assertDictEqual({(e5.type, e5.state_key): e5.event_id}, state_dict)
+
+    def test_batched_state_group_storing(self) -> None:
+        creation_event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        state_to_event = self.get_success(
+            self.storage.state.get_state_groups(
+                self.room.to_string(), [creation_event.event_id]
+            )
+        )
+        current_state_group = list(state_to_event.keys())[0]
+
+        # create some unpersisted events and event contexts to store against room
+        events_and_context = []
+        builder = self.event_builder_factory.for_room_version(
+            RoomVersions.V1,
+            {
+                "type": EventTypes.Name,
+                "sender": self.u_alice.to_string(),
+                "state_key": "",
+                "room_id": self.room.to_string(),
+                "content": {"name": "first rename of room"},
+            },
+        )
+
+        event1, unpersisted_context1 = self.get_success(
+            self.event_creation_handler.create_new_client_event(builder)
+        )
+        events_and_context.append((event1, unpersisted_context1))
+
+        builder2 = self.event_builder_factory.for_room_version(
+            RoomVersions.V1,
+            {
+                "type": EventTypes.JoinRules,
+                "sender": self.u_alice.to_string(),
+                "state_key": "",
+                "room_id": self.room.to_string(),
+                "content": {"join_rule": "private"},
+            },
+        )
+
+        event2, unpersisted_context2 = self.get_success(
+            self.event_creation_handler.create_new_client_event(builder2)
+        )
+        events_and_context.append((event2, unpersisted_context2))
+
+        builder3 = self.event_builder_factory.for_room_version(
+            RoomVersions.V1,
+            {
+                "type": EventTypes.Message,
+                "sender": self.u_alice.to_string(),
+                "room_id": self.room.to_string(),
+                "content": {"body": "hello from event 3", "msgtype": "m.text"},
+            },
+        )
+
+        event3, unpersisted_context3 = self.get_success(
+            self.event_creation_handler.create_new_client_event(builder3)
+        )
+        events_and_context.append((event3, unpersisted_context3))
+
+        builder4 = self.event_builder_factory.for_room_version(
+            RoomVersions.V1,
+            {
+                "type": EventTypes.JoinRules,
+                "sender": self.u_alice.to_string(),
+                "state_key": "",
+                "room_id": self.room.to_string(),
+                "content": {"join_rule": "public"},
+            },
+        )
+
+        event4, unpersisted_context4 = self.get_success(
+            self.event_creation_handler.create_new_client_event(builder4)
+        )
+        events_and_context.append((event4, unpersisted_context4))
+
+        processed_events_and_context = self.get_success(
+            self.hs.get_datastores().state.store_state_deltas_for_batched(
+                events_and_context, self.room.to_string(), current_state_group
+            )
+        )
+
+        # check that only state events are in state_groups, and all state events are in state_groups
+        res = cast(
+            List[Tuple[str]],
+            self.get_success(
+                self.store.db_pool.simple_select_list(
+                    table="state_groups",
+                    keyvalues=None,
+                    retcols=("event_id",),
+                )
+            ),
+        )
+
+        events = []
+        for result in res:
+            self.assertNotIn(event3.event_id, result)  # XXX
+            events.append(result[0])
+
+        for event, _ in processed_events_and_context:
+            if event.is_state():
+                self.assertIn(event.event_id, events)
+
+        # check that each unique state has state group in state_groups_state and that the
+        # type/state key is correct, and check that each state event's state group
+        # has an entry and prev event in state_group_edges
+        for event, context in processed_events_and_context:
+            if event.is_state():
+                state = cast(
+                    List[Tuple[str, str]],
+                    self.get_success(
+                        self.store.db_pool.simple_select_list(
+                            table="state_groups_state",
+                            keyvalues={"state_group": context.state_group_after_event},
+                            retcols=("type", "state_key"),
+                        )
+                    ),
+                )
+                self.assertEqual(event.type, state[0][0])
+                self.assertEqual(event.state_key, state[0][1])
+
+                groups = cast(
+                    List[Tuple[str]],
+                    self.get_success(
+                        self.store.db_pool.simple_select_list(
+                            table="state_group_edges",
+                            keyvalues={
+                                "state_group": str(context.state_group_after_event)
+                            },
+                            retcols=("prev_state_group",),
+                        )
+                    ),
+                )
+                self.assertEqual(context.state_group_before_event, groups[0][0])

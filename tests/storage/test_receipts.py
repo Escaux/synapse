@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 from typing import Collection, Optional
 
@@ -37,9 +44,9 @@ class ReceiptTestCase(HomeserverTestCase):
         self.store = homeserver.get_datastores().main
 
         self.room_creator = homeserver.get_room_creation_handler()
-        self.persist_event_storage_controller = (
-            self.hs.get_storage_controllers().persistence
-        )
+        persist_event_storage_controller = self.hs.get_storage_controllers().persistence
+        assert persist_event_storage_controller is not None
+        self.persist_event_storage_controller = persist_event_storage_controller
 
         # Create a test user
         self.ourUser = UserID.from_string(OUR_USER_ID)
@@ -50,12 +57,14 @@ class ReceiptTestCase(HomeserverTestCase):
         self.otherRequester = create_requester(self.otherUser)
 
         # Create a test room
-        info, _ = self.get_success(self.room_creator.create_room(self.ourRequester, {}))
-        self.room_id1 = info["room_id"]
+        self.room_id1, _, _ = self.get_success(
+            self.room_creator.create_room(self.ourRequester, {})
+        )
 
         # Create a second test room
-        info, _ = self.get_success(self.room_creator.create_room(self.ourRequester, {}))
-        self.room_id2 = info["room_id"]
+        self.room_id2, _, _ = self.get_success(
+            self.room_creator.create_room(self.ourRequester, {})
+        )
 
         # Join the second user to the first room
         memberEvent, memberEventContext = self.get_success(

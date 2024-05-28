@@ -1,20 +1,43 @@
-# Copyright 2014-2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import collections.abc
 import logging
-from typing import TYPE_CHECKING, Any, Collection, Dict, Iterable, Optional, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Collection,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
 
 import attr
 
@@ -35,7 +58,7 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.main.events_worker import EventsWorkerStore
 from synapse.storage.databases.main.roommember import RoomMemberWorkerStore
-from synapse.types import JsonDict, JsonMapping, StateMap
+from synapse.types import JsonDict, JsonMapping, StateKey, StateMap, StrCollection
 from synapse.types.state import StateFilter
 from synapse.util.caches import intern_string
 from synapse.util.caches.descriptors import cached, cachedList
@@ -46,6 +69,8 @@ if TYPE_CHECKING:
     from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 MAX_STATE_DELTA_HOPS = 100
@@ -95,6 +120,7 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
             for row in rows:
                 assert isinstance(row, UnPartialStatedEventStreamRow)
                 self._get_state_group_for_event.invalidate((row.event_id,))
+                self.is_partial_state_event.invalidate((row.event_id,))
 
         super().process_replication_rows(stream_name, instance_name, token, rows)
 
@@ -300,6 +326,20 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
             "get_partial_current_state_ids", _get_current_state_ids_txn
         )
 
+    async def check_if_events_in_current_state(
+        self, event_ids: StrCollection
+    ) -> FrozenSet[str]:
+        """Checks and returns which of the given events is part of the current state."""
+        rows = await self.db_pool.simple_select_many_batch(
+            table="current_state_events",
+            column="event_id",
+            iterable=event_ids,
+            retcols=("event_id",),
+            desc="check_if_events_in_current_state",
+        )
+
+        return frozenset(event_id for event_id, in rows)
+
     # FIXME: how should this be cached?
     @cancellable
     async def get_partial_filtered_current_state_ids(
@@ -331,7 +371,8 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
         def _get_filtered_current_state_ids_txn(
             txn: LoggingTransaction,
         ) -> StateMap[str]:
-            results = {}
+            results = StateMapWrapper(state_filter=state_filter or StateFilter.all())
+
             sql = """
                 SELECT type, state_key, event_id FROM current_state_events
                 WHERE room_id = ?
@@ -371,22 +412,25 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
     )
     async def _get_state_group_for_events(
         self, event_ids: Collection[str]
-    ) -> Dict[str, int]:
+    ) -> Mapping[str, int]:
         """Returns mapping event_id -> state_group.
 
         Raises:
              RuntimeError if the state is unknown at any of the given events
         """
-        rows = await self.db_pool.simple_select_many_batch(
-            table="event_to_state_groups",
-            column="event_id",
-            iterable=event_ids,
-            keyvalues={},
-            retcols=("event_id", "state_group"),
-            desc="_get_state_group_for_events",
+        rows = cast(
+            List[Tuple[str, int]],
+            await self.db_pool.simple_select_many_batch(
+                table="event_to_state_groups",
+                column="event_id",
+                iterable=event_ids,
+                keyvalues={},
+                retcols=("event_id", "state_group"),
+                desc="_get_state_group_for_events",
+            ),
         )
 
-        res = {row["event_id"]: row["state_group"] for row in rows}
+        res = dict(rows)
         for e in event_ids:
             if e not in res:
                 raise RuntimeError("No state group for unknown or outlier event %s" % e)
@@ -404,16 +448,19 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
             The subset of state groups that are referenced.
         """
 
-        rows = await self.db_pool.simple_select_many_batch(
-            table="event_to_state_groups",
-            column="state_group",
-            iterable=state_groups,
-            keyvalues={},
-            retcols=("DISTINCT state_group",),
-            desc="get_referenced_state_groups",
+        rows = cast(
+            List[Tuple[int]],
+            await self.db_pool.simple_select_many_batch(
+                table="event_to_state_groups",
+                column="state_group",
+                iterable=state_groups,
+                keyvalues={},
+                retcols=("DISTINCT state_group",),
+                desc="get_referenced_state_groups",
+            ),
         )
 
-        return {row["state_group"] for row in rows}
+        return {row[0] for row in rows}
 
     async def update_state_for_partial_state_event(
         self,
@@ -485,10 +532,10 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
                 "rejection_status_changed": rejection_status_changed,
             },
         )
+        txn.call_after(self.hs.get_notifier().on_new_replication_data)
 
 
 class MainStateBackgroundUpdateStore(RoomMemberWorkerStore):
-
     CURRENT_STATE_INDEX_UPDATE_NAME = "current_state_members_idx"
     EVENT_STATE_GROUP_INDEX_UPDATE_NAME = "event_to_state_groups_sg_index"
     DELETE_CURRENT_STATE_UPDATE_NAME = "delete_old_current_state_events"
@@ -613,16 +660,22 @@ class MainStateBackgroundUpdateStore(RoomMemberWorkerStore):
             # potentially stale, since there may have been a period where the
             # server didn't share a room with the remote user and therefore may
             # have missed any device updates.
-            rows = self.db_pool.simple_select_many_txn(
-                txn,
-                table="current_state_events",
-                column="room_id",
-                iterable=to_delete,
-                keyvalues={"type": EventTypes.Member, "membership": Membership.JOIN},
-                retcols=("state_key",),
+            rows = cast(
+                List[Tuple[str]],
+                self.db_pool.simple_select_many_txn(
+                    txn,
+                    table="current_state_events",
+                    column="room_id",
+                    iterable=to_delete,
+                    keyvalues={
+                        "type": EventTypes.Member,
+                        "membership": Membership.JOIN,
+                    },
+                    retcols=("state_key",),
+                ),
             )
 
-            potentially_left_users = {row["state_key"] for row in rows}
+            potentially_left_users = {row[0] for row in rows}
 
             # Now lets actually delete the rooms from the DB.
             self.db_pool.simple_delete_many_txn(
@@ -696,3 +749,39 @@ class StateStore(StateGroupWorkerStore, MainStateBackgroundUpdateStore):
         hs: "HomeServer",
     ):
         super().__init__(database, db_conn, hs)
+
+
+@attr.s(auto_attribs=True, slots=True)
+class StateMapWrapper(Dict[StateKey, str]):
+    """A wrapper around a StateMap[str] to ensure that we only query for items
+    that were not filtered out.
+
+    This is to help prevent bugs where we filter out state but other bits of the
+    code expect the state to be there.
+    """
+
+    state_filter: StateFilter
+
+    def __getitem__(self, key: StateKey) -> str:
+        if key not in self.state_filter:
+            raise Exception("State map was filtered and doesn't include: %s", key)
+        return super().__getitem__(key)
+
+    @overload
+    def get(self, key: Tuple[str, str]) -> Optional[str]: ...
+
+    @overload
+    def get(self, key: Tuple[str, str], default: Union[str, _T]) -> Union[str, _T]: ...
+
+    def get(
+        self, key: StateKey, default: Union[str, _T, None] = None
+    ) -> Union[str, _T, None]:
+        if key not in self.state_filter:
+            raise Exception("State map was filtered and doesn't include: %s", key)
+        return super().get(key, default)
+
+    def __contains__(self, key: Any) -> bool:
+        if key not in self.state_filter:
+            raise Exception("State map was filtered and doesn't include: %s", key)
+
+        return super().__contains__(key)

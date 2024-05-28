@@ -1,16 +1,22 @@
-# Copyright 2018 New Vector Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This file is licensed under the Affero General Public License (AGPL) version 3.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
+#
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """
 We want to stop populating 'event.content', so we need to make it nullable.
@@ -53,16 +59,13 @@ SQLite:
 
 import logging
 
-from synapse.storage.engines import PostgresEngine
+from synapse.storage.database import LoggingTransaction
+from synapse.storage.engines import BaseDatabaseEngine, PostgresEngine
 
 logger = logging.getLogger(__name__)
 
 
-def run_create(cur, database_engine, *args, **kwargs):
-    pass
-
-
-def run_upgrade(cur, database_engine, *args, **kwargs):
+def run_create(cur: LoggingTransaction, database_engine: BaseDatabaseEngine) -> None:
     if isinstance(database_engine, PostgresEngine):
         cur.execute(
             """
@@ -76,7 +79,9 @@ def run_upgrade(cur, database_engine, *args, **kwargs):
     cur.execute(
         "SELECT sql FROM sqlite_master WHERE tbl_name='events' AND type='table'"
     )
-    (oldsql,) = cur.fetchone()
+    row = cur.fetchone()
+    assert row is not None
+    (oldsql,) = row
 
     sql = oldsql.replace("content TEXT NOT NULL", "content TEXT")
     if sql == oldsql:
@@ -85,7 +90,9 @@ def run_upgrade(cur, database_engine, *args, **kwargs):
     logger.info("Replacing definition of 'events' with: %s", sql)
 
     cur.execute("PRAGMA schema_version")
-    (oldver,) = cur.fetchone()
+    row = cur.fetchone()
+    assert row is not None
+    (oldver,) = row
     cur.execute("PRAGMA writable_schema=ON")
     cur.execute(
         "UPDATE sqlite_master SET sql=? WHERE tbl_name='events' AND type='table'",

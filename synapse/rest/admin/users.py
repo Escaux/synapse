@@ -1,32 +1,43 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2019 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import hashlib
 import hmac
 import logging
 import secrets
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
-from synapse.api.constants import UserTypes
+import attr
+
+from synapse.api.constants import Direction, UserTypes
 from synapse.api.errors import Codes, NotFoundError, SynapseError
 from synapse.http.servlet import (
     RestServlet,
     assert_params_in_dict,
     parse_boolean,
+    parse_enum,
     parse_integer,
     parse_json_object_from_request,
     parse_string,
+    parse_strings_from_args,
 )
 from synapse.http.site import SynapseRequest
 from synapse.rest.admin._base import (
@@ -37,7 +48,7 @@ from synapse.rest.admin._base import (
 from synapse.rest.client._base import client_patterns
 from synapse.storage.databases.main.registration import ExternalIDReuseException
 from synapse.storage.databases.main.stats import UserSortOrder
-from synapse.types import JsonDict, UserID
+from synapse.types import JsonDict, JsonMapping, UserID
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -63,6 +74,10 @@ class UsersRestServletV2(RestServlet):
     The parameter `guests` can be used to exclude guest users.
     The parameter `deactivated` can be used to include deactivated users.
     The parameter `order_by` can be used to order the result.
+    The parameter `not_user_type` can be used to exclude certain user types.
+    The parameter `locked` can be used to include locked users.
+    Possible values are `bot`, `support` or "empty string".
+    "empty string" here means to exclude users without a type.
     """
 
     def __init__(self, hs: "HomeServer"):
@@ -70,31 +85,29 @@ class UsersRestServletV2(RestServlet):
         self.auth = hs.get_auth()
         self.admin_handler = hs.get_admin_handler()
         self._msc3866_enabled = hs.config.experimental.msc3866.enabled
+        self._msc3861_enabled = hs.config.experimental.msc3861.enabled
 
     async def on_GET(self, request: SynapseRequest) -> Tuple[int, JsonDict]:
         await assert_requester_is_admin(self.auth, request)
 
-        start = parse_integer(request, "from", default=0)
-        limit = parse_integer(request, "limit", default=100)
-
-        if start < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter from must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
-
-        if limit < 0:
-            raise SynapseError(
-                HTTPStatus.BAD_REQUEST,
-                "Query parameter limit must be a string representing a positive integer.",
-                errcode=Codes.INVALID_PARAM,
-            )
+        start = parse_integer(request, "from", default=0, negative=False)
+        limit = parse_integer(request, "limit", default=100, negative=False)
 
         user_id = parse_string(request, "user_id")
-        name = parse_string(request, "name")
+        name = parse_string(request, "name", encoding="utf-8")
+
         guests = parse_boolean(request, "guests", default=True)
-        deactivated = parse_boolean(request, "deactivated", default=False)
+        if self._msc3861_enabled and guests:
+            raise SynapseError(
+                HTTPStatus.BAD_REQUEST,
+                "The guests parameter is not supported when MSC3861 is enabled.",
+                errcode=Codes.INVALID_PARAM,
+            )
+
+        deactivated = self._parse_parameter_deactivated(request)
+
+        locked = parse_boolean(request, "locked", default=False)
+        admins = parse_boolean(request, "admins")
 
         # If support for MSC3866 is not enabled, apply no filtering based on the
         # `approved` column.
@@ -117,10 +130,16 @@ class UsersRestServletV2(RestServlet):
                 UserSortOrder.AVATAR_URL.value,
                 UserSortOrder.SHADOW_BANNED.value,
                 UserSortOrder.CREATION_TS.value,
+                UserSortOrder.LAST_SEEN_TS.value,
+                UserSortOrder.LOCKED.value,
             ),
         )
 
-        direction = parse_string(request, "dir", default="f", allowed_values=("f", "b"))
+        direction = parse_enum(request, "dir", Direction, default=Direction.FORWARDS)
+
+        # twisted.web.server.Request.args is incorrectly defined as Optional[Any]
+        args: Dict[bytes, List[bytes]] = request.args  # type: ignore
+        not_user_types = parse_strings_from_args(args, "not_user_type")
 
         users, total = await self.store.get_users_paginate(
             start,
@@ -129,21 +148,42 @@ class UsersRestServletV2(RestServlet):
             name,
             guests,
             deactivated,
+            admins,
             order_by,
             direction,
             approved,
+            not_user_types,
+            locked,
         )
 
         # If support for MSC3866 is not enabled, don't show the approval flag.
+        filter = None
         if not self._msc3866_enabled:
-            for user in users:
-                del user["approved"]
 
-        ret = {"users": users, "total": total}
+            def _filter(a: attr.Attribute) -> bool:
+                return a.name != "approved"
+
+        ret = {"users": [attr.asdict(u, filter=filter) for u in users], "total": total}
         if (start + limit) < total:
             ret["next_token"] = str(start + len(users))
 
         return HTTPStatus.OK, ret
+
+    def _parse_parameter_deactivated(self, request: SynapseRequest) -> Optional[bool]:
+        """
+        Return None (no filtering) if `deactivated` is `true`, otherwise return `False`
+        (exclude deactivated users from the results).
+        """
+        return None if parse_boolean(request, "deactivated") else False
+
+
+class UsersRestServletV3(UsersRestServletV2):
+    PATTERNS = admin_patterns("/users$", "v3")
+
+    def _parse_parameter_deactivated(
+        self, request: SynapseRequest
+    ) -> Union[bool, None]:
+        return parse_boolean(request, "deactivated")
 
 
 class UserRestServletV2(RestServlet):
@@ -189,7 +229,7 @@ class UserRestServletV2(RestServlet):
 
     async def on_GET(
         self, request: SynapseRequest, user_id: str
-    ) -> Tuple[int, JsonDict]:
+    ) -> Tuple[int, JsonMapping]:
         await assert_requester_is_admin(self.auth, request)
 
         target_user = UserID.from_string(user_id)
@@ -204,7 +244,7 @@ class UserRestServletV2(RestServlet):
 
     async def on_PUT(
         self, request: SynapseRequest, user_id: str
-    ) -> Tuple[int, JsonDict]:
+    ) -> Tuple[int, JsonMapping]:
         requester = await self.auth.get_user_by_req(request)
         await assert_user_is_admin(self.auth, requester)
 
@@ -262,6 +302,17 @@ class UserRestServletV2(RestServlet):
                 HTTPStatus.BAD_REQUEST, "'deactivated' parameter is not of type boolean"
             )
 
+        lock = body.get("locked", False)
+        if not isinstance(lock, bool):
+            raise SynapseError(
+                HTTPStatus.BAD_REQUEST, "'locked' parameter is not of type boolean"
+            )
+
+        if deactivate and lock:
+            raise SynapseError(
+                HTTPStatus.BAD_REQUEST, "An user can't be deactivated and locked"
+            )
+
         approved: Optional[bool] = None
         if "approved" in body and self._msc3866_enabled:
             approved = body["approved"]
@@ -292,9 +343,8 @@ class UserRestServletV2(RestServlet):
 
             if threepids is not None:
                 # get changed threepids (added and removed)
-                # convert List[Dict[str, Any]] into Set[Tuple[str, str]]
                 cur_threepids = {
-                    (threepid["medium"], threepid["address"])
+                    (threepid.medium, threepid.address)
                     for threepid in await self.store.user_get_threepids(user_id)
                 }
                 add_threepids = new_threepids - cur_threepids
@@ -303,12 +353,19 @@ class UserRestServletV2(RestServlet):
                 # remove old threepids
                 for medium, address in del_threepids:
                     try:
-                        await self.auth_handler.delete_threepid(
-                            user_id, medium, address, None
+                        # Attempt to remove any known bindings of this third-party ID
+                        # and user ID from identity servers.
+                        await self.hs.get_identity_handler().try_unbind_threepid(
+                            user_id, medium, address, id_server=None
                         )
                     except Exception:
                         logger.exception("Failed to remove threepids")
                         raise SynapseError(500, "Failed to remove threepids")
+
+                    # Delete the local association of this user ID and third-party ID.
+                    await self.auth_handler.delete_local_threepid(
+                        user_id, medium, address
+                    )
 
                 # add new threepids
                 current_time = self.hs.get_clock().time_msec()
@@ -328,7 +385,7 @@ class UserRestServletV2(RestServlet):
                         HTTPStatus.CONFLICT, "External id is already in use."
                     )
 
-            if "avatar_url" in body and isinstance(body["avatar_url"], str):
+            if "avatar_url" in body:
                 await self.profile_handler.set_avatar_url(
                     target_user, requester, body["avatar_url"], True
                 )
@@ -359,18 +416,15 @@ class UserRestServletV2(RestServlet):
                         target_user.to_string(), False, requester, by_admin=True
                     )
                 elif not deactivate and user["deactivated"]:
-                    if (
-                        "password" not in body
-                        and self.auth_handler.can_change_password()
-                    ):
-                        raise SynapseError(
-                            HTTPStatus.BAD_REQUEST,
-                            "Must provide a password to re-activate an account.",
-                        )
-
                     await self.deactivate_account_handler.activate_account(
                         target_user.to_string()
                     )
+
+            if "locked" in body:
+                if lock and not user["locked"]:
+                    await self.store.set_user_locked_status(user_id, True)
+                elif not lock and user["locked"]:
+                    await self.store.set_user_locked_status(user_id, False)
 
             if "user_type" in body:
                 await self.store.set_user_type(target_user, user_type)
@@ -417,7 +471,6 @@ class UserRestServletV2(RestServlet):
                     ):
                         await self.pusher_pool.add_or_update_pusher(
                             user_id=user_id,
-                            access_token=None,
                             kind="email",
                             app_id="m.email",
                             app_display_name="Email Notifications",
@@ -578,6 +631,12 @@ class UserRegisterServlet(RestServlet):
         if not hmac.compare_digest(want_mac.encode("ascii"), got_mac.encode("ascii")):
             raise SynapseError(HTTPStatus.FORBIDDEN, "HMAC incorrect")
 
+        should_issue_refresh_token = body.get("refresh_token", False)
+        if not isinstance(should_issue_refresh_token, bool):
+            raise SynapseError(
+                HTTPStatus.BAD_REQUEST, "refresh_token must be a boolean"
+            )
+
         # Reuse the parts of RegisterRestServlet to reduce code duplication
         from synapse.rest.client.register import RegisterRestServlet
 
@@ -593,7 +652,9 @@ class UserRegisterServlet(RestServlet):
             approved=True,
         )
 
-        result = await register._create_registration_details(user_id, body)
+        result = await register._create_registration_details(
+            user_id, body, should_issue_refresh_token=should_issue_refresh_token
+        )
         return HTTPStatus.OK, result
 
 
@@ -613,7 +674,7 @@ class WhoisRestServlet(RestServlet):
 
     async def on_GET(
         self, request: SynapseRequest, user_id: str
-    ) -> Tuple[int, JsonDict]:
+    ) -> Tuple[int, JsonMapping]:
         target_user = UserID.from_string(user_id)
         requester = await self.auth.get_user_by_req(request)
 
@@ -675,15 +736,18 @@ class AccountValidityRenewServlet(RestServlet):
     PATTERNS = admin_patterns("/account_validity/validity$")
 
     def __init__(self, hs: "HomeServer"):
-        self.account_activity_handler = hs.get_account_validity_handler()
+        self.account_validity_handler = hs.get_account_validity_handler()
+        self.account_validity_module_callbacks = (
+            hs.get_module_api_callbacks().account_validity
+        )
         self.auth = hs.get_auth()
 
     async def on_POST(self, request: SynapseRequest) -> Tuple[int, JsonDict]:
         await assert_requester_is_admin(self.auth, request)
 
-        if self.account_activity_handler.on_legacy_admin_request_callback:
-            expiration_ts = await (
-                self.account_activity_handler.on_legacy_admin_request_callback(request)
+        if self.account_validity_module_callbacks.on_legacy_admin_request_callback:
+            expiration_ts = await self.account_validity_module_callbacks.on_legacy_admin_request_callback(
+                request
             )
         else:
             body = parse_json_object_from_request(request)
@@ -694,7 +758,7 @@ class AccountValidityRenewServlet(RestServlet):
                     "Missing property 'user_id' in the request body",
                 )
 
-            expiration_ts = await self.account_activity_handler.renew_account_for_user(
+            expiration_ts = await self.account_validity_handler.renew_account_for_user(
                 body["user_id"],
                 body.get("expiration_ts"),
                 not body.get("enable_renewal_emails", True),
@@ -790,7 +854,18 @@ class SearchUsersRestServlet(RestServlet):
         logger.info("term: %s ", term)
 
         ret = await self.store.search_users(term)
-        return HTTPStatus.OK, ret
+        results = [
+            {
+                "name": name,
+                "password_hash": password_hash,
+                "is_guest": bool(is_guest),
+                "admin": bool(admin),
+                "user_type": user_type,
+            }
+            for name, password_hash, is_guest, admin, user_type in ret
+        ]
+
+        return HTTPStatus.OK, results
 
 
 class UserAdminServlet(RestServlet):
@@ -973,7 +1048,7 @@ class UserTokenRestServlet(RestServlet):
         body = parse_json_object_from_request(request, allow_empty_body=True)
 
         valid_until_ms = body.get("valid_until_ms")
-        if valid_until_ms and not isinstance(valid_until_ms, int):
+        if type(valid_until_ms) not in (int, type(None)):
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST, "'valid_until_ms' parameter must be an int"
             )
@@ -1095,12 +1170,14 @@ class RateLimitRestServlet(RestServlet):
             # convert `null` to `0` for consistency
             # both values do the same in retelimit handler
             ret = {
-                "messages_per_second": 0
-                if ratelimit.messages_per_second is None
-                else ratelimit.messages_per_second,
-                "burst_count": 0
-                if ratelimit.burst_count is None
-                else ratelimit.burst_count,
+                "messages_per_second": (
+                    0
+                    if ratelimit.messages_per_second is None
+                    else ratelimit.messages_per_second
+                ),
+                "burst_count": (
+                    0 if ratelimit.burst_count is None else ratelimit.burst_count
+                ),
             }
         else:
             ret = {}
@@ -1125,14 +1202,17 @@ class RateLimitRestServlet(RestServlet):
         messages_per_second = body.get("messages_per_second", 0)
         burst_count = body.get("burst_count", 0)
 
-        if not isinstance(messages_per_second, int) or messages_per_second < 0:
+        if (
+            type(messages_per_second) is not int  # noqa: E721
+            or messages_per_second < 0
+        ):
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST,
                 "%r parameter must be a positive int" % (messages_per_second,),
                 errcode=Codes.INVALID_PARAM,
             )
 
-        if not isinstance(burst_count, int) or burst_count < 0:
+        if type(burst_count) is not int or burst_count < 0:  # noqa: E721
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST,
                 "%r parameter must be a positive int" % (burst_count,),
@@ -1191,13 +1271,54 @@ class AccountDataRestServlet(RestServlet):
         if not await self._store.get_user_by_id(user_id):
             raise NotFoundError("User not found")
 
-        global_data, by_room_data = await self._store.get_account_data_for_user(user_id)
+        global_data = await self._store.get_global_account_data_for_user(user_id)
+        by_room_data = await self._store.get_room_account_data_for_user(user_id)
         return HTTPStatus.OK, {
             "account_data": {
                 "global": global_data,
                 "rooms": by_room_data,
             },
         }
+
+
+class UserReplaceMasterCrossSigningKeyRestServlet(RestServlet):
+    """Allow a given user to replace their master cross-signing key without UIA.
+
+    This replacement is permitted for a limited period (currently 10 minutes).
+
+    While this is exposed via the admin API, this is intended for use by the
+    Matrix Authentication Service rather than server admins.
+    """
+
+    PATTERNS = admin_patterns(
+        "/users/(?P<user_id>[^/]*)/_allow_cross_signing_replacement_without_uia"
+    )
+    REPLACEMENT_PERIOD_MS = 10 * 60 * 1000  # 10 minutes
+
+    def __init__(self, hs: "HomeServer"):
+        self._auth = hs.get_auth()
+        self._store = hs.get_datastores().main
+
+    async def on_POST(
+        self,
+        request: SynapseRequest,
+        user_id: str,
+    ) -> Tuple[int, JsonDict]:
+        await assert_requester_is_admin(self._auth, request)
+
+        if user_id is None:
+            raise NotFoundError("User not found")
+
+        timestamp = (
+            await self._store.allow_master_cross_signing_key_replacement_without_uia(
+                user_id, self.REPLACEMENT_PERIOD_MS
+            )
+        )
+
+        if timestamp is None:
+            raise NotFoundError("User has no master cross-signing key")
+
+        return HTTPStatus.OK, {"updatable_without_uia_before_ms": timestamp}
 
 
 class UserByExternalId(RestServlet):

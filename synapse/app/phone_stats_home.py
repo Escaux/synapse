@@ -1,21 +1,28 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 #  Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 import math
 import resource
 import sys
-from typing import TYPE_CHECKING, List, Sized, Tuple
+from typing import TYPE_CHECKING, List, Mapping, Sized, Tuple
 
 from prometheus_client import Gauge
 
@@ -127,10 +134,6 @@ async def phone_stats_home(
     daily_sent_messages = await store.count_daily_sent_messages()
     stats["daily_sent_messages"] = daily_sent_messages
 
-    r30_results = await store.count_r30_users()
-    for name, count in r30_results.items():
-        stats["r30_users_" + name] = count
-
     r30v2_results = await store.count_r30v2_users()
     for name, count in r30v2_results.items():
         stats["r30v2_users_" + name] = count
@@ -194,7 +197,7 @@ def start_phone_stats_home(hs: "HomeServer") -> None:
     @wrap_as_background_process("generate_monthly_active_users")
     async def generate_monthly_active_users() -> None:
         current_mau_count = 0
-        current_mau_count_by_service = {}
+        current_mau_count_by_service: Mapping[str, int] = {}
         reserved_users: Sized = ()
         store = hs.get_datastores().main
         if hs.config.server.limit_usage_by_mau or hs.config.server.mau_stats_only:

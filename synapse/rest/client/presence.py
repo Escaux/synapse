@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2014-2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 
 """ This module contains REST servlets to do with presence: /presence/<paths>
 """
@@ -33,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 class PresenceStatusRestServlet(RestServlet):
     PATTERNS = client_patterns("/presence/(?P<user_id>[^/]*)/status", v1=True)
+    CATEGORY = "Presence requests"
 
     def __init__(self, hs: "HomeServer"):
         super().__init__()
@@ -41,15 +49,13 @@ class PresenceStatusRestServlet(RestServlet):
         self.clock = hs.get_clock()
         self.auth = hs.get_auth()
 
-        self._use_presence = hs.config.server.use_presence
-
     async def on_GET(
         self, request: SynapseRequest, user_id: str
     ) -> Tuple[int, JsonDict]:
         requester = await self.auth.get_user_by_req(request)
         user = UserID.from_string(user_id)
 
-        if not self._use_presence:
+        if not self.hs.config.server.presence_enabled:
             return 200, {"presence": "offline"}
 
         if requester.user != user:
@@ -95,8 +101,8 @@ class PresenceStatusRestServlet(RestServlet):
         except Exception:
             raise SynapseError(400, "Unable to parse state")
 
-        if self._use_presence:
-            await self.presence_handler.set_state(user, state)
+        if self.hs.config.server.track_presence:
+            await self.presence_handler.set_state(user, requester.device_id, state)
 
         return 200, {}
 

@@ -1,16 +1,23 @@
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright 2022 The Matrix.org Foundation C.I.C.
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import os
 import re
 from email.parser import Parser
@@ -31,6 +38,7 @@ from synapse.rest import admin
 from synapse.rest.client import account, login, register, room
 from synapse.rest.synapse.client.password_reset import PasswordResetSubmitTokenResource
 from synapse.server import HomeServer
+from synapse.storage._base import db_to_json
 from synapse.types import JsonDict, UserID
 from synapse.util import Clock
 
@@ -40,7 +48,6 @@ from tests.unittest import override_config
 
 
 class PasswordResetTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         account.register_servlets,
         synapse.rest.admin.register_servlets_for_client_rest_resource,
@@ -134,6 +141,18 @@ class PasswordResetTestCase(unittest.HomeserverTestCase):
 
         # Assert we can't log in with the old password
         self.attempt_wrong_password_login("kermit", old_password)
+
+        # Check that the UI Auth information doesn't store the password in the database.
+        #
+        # Note that we don't have the UI Auth session ID, so just pull out the single
+        # row.
+        result = self.get_success(
+            self.store.db_pool.simple_select_one_onecol(
+                "ui_auth_sessions", keyvalues={}, retcol="clientdict"
+            )
+        )
+        client_dict = db_to_json(result)
+        self.assertNotIn("new_password", client_dict)
 
     @override_config({"rc_3pid_validation": {"burst_count": 3}})
     def test_ratelimit_by_email(self) -> None:
@@ -310,16 +329,49 @@ class PasswordResetTestCase(unittest.HomeserverTestCase):
 
         self.assertIsNotNone(session_id)
 
+    def test_password_reset_redirection(self) -> None:
+        """Test basic password reset flow"""
+        old_password = "monkey"
+
+        user_id = self.register_user("kermit", old_password)
+        self.login("kermit", old_password)
+
+        email = "test@example.com"
+
+        # Add a threepid
+        self.get_success(
+            self.store.user_add_threepid(
+                user_id=user_id,
+                medium="email",
+                address=email,
+                validated_at=0,
+                added_at=0,
+            )
+        )
+
+        client_secret = "foobar"
+        next_link = "http://example.com"
+        self._request_token(email, client_secret, "127.0.0.1", next_link)
+
+        self.assertEqual(len(self.email_attempts), 1)
+        link = self._get_link_from_email()
+
+        self._validate_token(link, next_link)
+
     def _request_token(
         self,
         email: str,
         client_secret: str,
         ip: str = "127.0.0.1",
+        next_link: Optional[str] = None,
     ) -> str:
+        body = {"client_secret": client_secret, "email": email, "send_attempt": 1}
+        if next_link is not None:
+            body["next_link"] = next_link
         channel = self.make_request(
             "POST",
             b"account/password/email/requestToken",
-            {"client_secret": client_secret, "email": email, "send_attempt": 1},
+            body,
             client_ip=ip,
         )
 
@@ -332,7 +384,7 @@ class PasswordResetTestCase(unittest.HomeserverTestCase):
 
         return channel.json_body["sid"]
 
-    def _validate_token(self, link: str) -> None:
+    def _validate_token(self, link: str, next_link: Optional[str] = None) -> None:
         # Remove the host
         path = link.replace("https://example.com", "")
 
@@ -360,7 +412,11 @@ class PasswordResetTestCase(unittest.HomeserverTestCase):
             shorthand=False,
             content_is_form=True,
         )
-        self.assertEqual(HTTPStatus.OK, channel.code, channel.result)
+        self.assertEqual(
+            HTTPStatus.OK if next_link is None else HTTPStatus.FOUND,
+            channel.code,
+            channel.result,
+        )
 
     def _get_link_from_email(self) -> str:
         assert self.email_attempts, "No emails have been sent"
@@ -408,7 +464,6 @@ class PasswordResetTestCase(unittest.HomeserverTestCase):
 
 
 class DeactivateTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         synapse.rest.admin.register_servlets_for_client_rest_resource,
         login.register_servlets,
@@ -476,6 +531,163 @@ class DeactivateTestCase(unittest.HomeserverTestCase):
         self.assertEqual(len(memberships), 1, memberships)
         self.assertEqual(memberships[0].room_id, room_id, memberships)
 
+    def test_deactivate_account_deletes_server_side_backup_keys(self) -> None:
+        key_handler = self.hs.get_e2e_room_keys_handler()
+        room_keys = {
+            "rooms": {
+                "!abc:matrix.org": {
+                    "sessions": {
+                        "c0ff33": {
+                            "first_message_index": 1,
+                            "forwarded_count": 1,
+                            "is_verified": False,
+                            "session_data": "SSBBTSBBIEZJU0gK",
+                        }
+                    }
+                }
+            }
+        }
+
+        user_id = self.register_user("missPiggy", "test")
+        tok = self.login("missPiggy", "test")
+
+        # add some backup keys/versions
+        version = self.get_success(
+            key_handler.create_version(
+                user_id,
+                {
+                    "algorithm": "m.megolm_backup.v1",
+                    "auth_data": "first_version_auth_data",
+                },
+            )
+        )
+
+        self.get_success(key_handler.upload_room_keys(user_id, version, room_keys))
+
+        version2 = self.get_success(
+            key_handler.create_version(
+                user_id,
+                {
+                    "algorithm": "m.megolm_backup.v1",
+                    "auth_data": "second_version_auth_data",
+                },
+            )
+        )
+
+        self.get_success(key_handler.upload_room_keys(user_id, version2, room_keys))
+
+        self.deactivate(user_id, tok)
+        store = self.hs.get_datastores().main
+
+        # Check that the user has been marked as deactivated.
+        self.assertTrue(self.get_success(store.get_user_deactivated_status(user_id)))
+
+        # Check that there are no entries in 'e2e_room_keys` and `e2e_room_keys_versions`
+        res = self.get_success(
+            self.hs.get_datastores().main.db_pool.simple_select_list(
+                "e2e_room_keys", {"user_id": user_id}, "*", "simple_select"
+            )
+        )
+        self.assertEqual(len(res), 0)
+
+        res2 = self.get_success(
+            self.hs.get_datastores().main.db_pool.simple_select_list(
+                "e2e_room_keys_versions", {"user_id": user_id}, "*", "simple_select"
+            )
+        )
+        self.assertEqual(len(res2), 0)
+
+    def test_background_update_deletes_deactivated_users_server_side_backup_keys(
+        self,
+    ) -> None:
+        key_handler = self.hs.get_e2e_room_keys_handler()
+        room_keys = {
+            "rooms": {
+                "!abc:matrix.org": {
+                    "sessions": {
+                        "c0ff33": {
+                            "first_message_index": 1,
+                            "forwarded_count": 1,
+                            "is_verified": False,
+                            "session_data": "SSBBTSBBIEZJU0gK",
+                        }
+                    }
+                }
+            }
+        }
+        self.store = self.hs.get_datastores().main
+
+        # create a bunch of users and add keys for them
+        users = []
+        for i in range(20):
+            user_id = self.register_user("missPiggy" + str(i), "test")
+            users.append((user_id,))
+
+            # add some backup keys/versions
+            version = self.get_success(
+                key_handler.create_version(
+                    user_id,
+                    {
+                        "algorithm": "m.megolm_backup.v1",
+                        "auth_data": str(i) + "_version_auth_data",
+                    },
+                )
+            )
+
+            self.get_success(key_handler.upload_room_keys(user_id, version, room_keys))
+
+            version2 = self.get_success(
+                key_handler.create_version(
+                    user_id,
+                    {
+                        "algorithm": "m.megolm_backup.v1",
+                        "auth_data": str(i) + "_version_auth_data",
+                    },
+                )
+            )
+
+            self.get_success(key_handler.upload_room_keys(user_id, version2, room_keys))
+
+        # deactivate most of the users by editing DB
+        self.get_success(
+            self.store.db_pool.simple_update_many(
+                table="users",
+                key_names=("name",),
+                key_values=users[0:18],
+                value_names=("deactivated",),
+                value_values=[(1,) for i in range(1, 19)],
+                desc="",
+            )
+        )
+
+        # run background update
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                "background_updates",
+                {
+                    "update_name": "delete_e2e_backup_keys_for_deactivated_users",
+                    "progress_json": "{}",
+                },
+            )
+        )
+        self.store.db_pool.updates._all_done = False
+        self.wait_for_background_updates()
+
+        # check that keys are deleted for the deactivated users but not the others
+        res = self.get_success(
+            self.hs.get_datastores().main.db_pool.simple_select_list(
+                "e2e_room_keys", None, ("user_id",), "simple_select"
+            )
+        )
+        self.assertEqual(len(res), 4)
+
+        res2 = self.get_success(
+            self.hs.get_datastores().main.db_pool.simple_select_list(
+                "e2e_room_keys_versions", None, ("user_id",), "simple_select"
+            )
+        )
+        self.assertEqual(len(res2), 4)
+
     def deactivate(self, user_id: str, tok: str) -> None:
         request_data = {
             "auth": {
@@ -492,7 +704,6 @@ class DeactivateTestCase(unittest.HomeserverTestCase):
 
 
 class WhoamiTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         synapse.rest.admin.register_servlets_for_client_rest_resource,
         login.register_servlets,
@@ -567,7 +778,6 @@ class WhoamiTestCase(unittest.HomeserverTestCase):
 
 
 class ThreepidEmailRestTestCase(unittest.HomeserverTestCase):
-
     servlets = [
         account.register_servlets,
         login.register_servlets,
@@ -1193,7 +1403,7 @@ class AccountStatusTestCase(unittest.HomeserverTestCase):
                 return {}
 
         # Register a mock that will return the expected result depending on the remote.
-        self.hs.get_federation_http_client().post_json = Mock(side_effect=post_json)
+        self.hs.get_federation_http_client().post_json = Mock(side_effect=post_json)  # type: ignore[method-assign]
 
         # Check that we've got the correct response from the client-side endpoint.
         self._test_status(
@@ -1253,9 +1463,8 @@ class AccountStatusTestCase(unittest.HomeserverTestCase):
             # account status will fail.
             return UserID.from_string(user_id).localpart == "someuser"
 
-        self.hs.get_account_validity_handler()._is_user_expired_callbacks.append(
-            is_expired
-        )
+        account_validity_callbacks = self.hs.get_module_api_callbacks().account_validity
+        account_validity_callbacks.is_user_expired_callbacks.append(is_expired)
 
         self._test_status(
             users=[user],

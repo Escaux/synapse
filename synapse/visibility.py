@@ -1,37 +1,59 @@
-# Copyright 2014 - 2016 OpenMarket Ltd
+#
+# This file is licensed under the Affero General Public License (AGPL) version 3.
+#
 # Copyright (C) The Matrix.org Foundation C.I.C. 2022
+# Copyright 2014 - 2016 OpenMarket Ltd
+# Copyright (C) 2023 New Vector, Ltd
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# See the GNU Affero General Public License for more details:
+# <https://www.gnu.org/licenses/agpl-3.0.html>.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Originally licensed under the Apache License, Version 2.0:
+# <http://www.apache.org/licenses/LICENSE-2.0>.
+#
+# [This file includes modifications made by New Vector Limited]
+#
+#
 import logging
 from enum import Enum, auto
-from typing import Collection, Dict, FrozenSet, List, Optional, Tuple
+from typing import (
+    Collection,
+    Dict,
+    Final,
+    FrozenSet,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import attr
-from typing_extensions import Final
 
-from synapse.api.constants import EventTypes, HistoryVisibility, Membership
+from synapse.api.constants import (
+    EventTypes,
+    EventUnsignedContentFields,
+    HistoryVisibility,
+    Membership,
+)
 from synapse.events import EventBase
 from synapse.events.snapshot import EventContext
-from synapse.events.utils import prune_event
+from synapse.events.utils import clone_event, prune_event
 from synapse.logging.opentracing import trace
 from synapse.storage.controllers import StorageControllers
 from synapse.storage.databases.main import DataStore
-from synapse.types import RetentionPolicy, StateMap, get_domain_from_id
+from synapse.types import RetentionPolicy, StateMap, StrCollection, get_domain_from_id
 from synapse.types.state import StateFilter
 from synapse.util import Clock
 
 logger = logging.getLogger(__name__)
-
+filtered_event_logger = logging.getLogger("synapse.visibility.filtered_event_debug")
 
 VISIBILITY_PRIORITY = (
     HistoryVisibility.WORLD_READABLE,
@@ -60,6 +82,7 @@ async def filter_events_for_client(
     is_peeking: bool = False,
     always_include_ids: FrozenSet[str] = frozenset(),
     filter_send_to_client: bool = True,
+    msc4115_membership_on_events: bool = False,
 ) -> List[EventBase]:
     """
     Check which events a user is allowed to see. If the user can see the event but its
@@ -78,17 +101,20 @@ async def filter_events_for_client(
         filter_send_to_client: Whether we're checking an event that's going to be
             sent to a client. This might not always be the case since this function can
             also be called to check whether a user can see the state at a given point.
+        msc4115_membership_on_events: Whether to include the requesting user's
+            membership in the "unsigned" data, per MSC4115.
 
     Returns:
-        The filtered events.
+        The filtered events. If `msc4115_membership_on_events` is true, the `unsigned`
+        data is annotated with the membership state of `user_id` at each event.
     """
     # Filter out events that have been soft failed so that we don't relay them
     # to clients.
     events_before_filtering = events
     events = [e for e in events if not e.internal_metadata.is_soft_failed()]
     if len(events_before_filtering) != len(events):
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
+        if filtered_event_logger.isEnabledFor(logging.DEBUG):
+            filtered_event_logger.debug(
                 "filter_events_for_client: Filtered out soft-failed events: Before=%s, After=%s",
                 [event.event_id for event in events_before_filtering],
                 [event.event_id for event in events],
@@ -112,12 +138,13 @@ async def filter_events_for_client(
         retention_policies: Dict[str, RetentionPolicy] = {}
 
         for room_id in room_ids:
-            retention_policies[
-                room_id
-            ] = await storage.main.get_retention_policy_for_room(room_id)
+            retention_policies[room_id] = (
+                await storage.main.get_retention_policy_for_room(room_id)
+            )
 
     def allowed(event: EventBase) -> Optional[EventBase]:
-        return _check_client_allowed_to_see_event(
+        state_after_event = event_id_to_state.get(event.event_id)
+        filtered = _check_client_allowed_to_see_event(
             user_id=user_id,
             event=event,
             clock=storage.main.clock,
@@ -125,13 +152,45 @@ async def filter_events_for_client(
             sender_ignored=event.sender in ignore_list,
             always_include_ids=always_include_ids,
             retention_policy=retention_policies[room_id],
-            state=event_id_to_state.get(event.event_id),
+            state=state_after_event,
             is_peeking=is_peeking,
             sender_erased=erased_senders.get(event.sender, False),
         )
+        if filtered is None:
+            return None
 
-    # Check each event: gives an iterable of None or (a potentially modified)
-    # EventBase.
+        if not msc4115_membership_on_events:
+            return filtered
+
+        # Annotate the event with the user's membership after the event.
+        #
+        # Normally we just look in `state_after_event`, but if the event is an outlier
+        # we won't have such a state. The only outliers that are returned here are the
+        # user's own membership event, so we can just inspect that.
+
+        user_membership_event: Optional[EventBase]
+        if event.type == EventTypes.Member and event.state_key == user_id:
+            user_membership_event = event
+        elif state_after_event is not None:
+            user_membership_event = state_after_event.get((EventTypes.Member, user_id))
+        else:
+            # unreachable!
+            raise Exception("Missing state for event that is not user's own membership")
+
+        user_membership = (
+            user_membership_event.membership
+            if user_membership_event
+            else Membership.LEAVE
+        )
+
+        # Copy the event before updating the unsigned data: this shouldn't be persisted
+        # to the cache!
+        cloned = clone_event(filtered)
+        cloned.unsigned[EventUnsignedContentFields.MSC4115_MEMBERSHIP] = user_membership
+
+        return cloned
+
+    # Check each event: gives an iterable of None or (a modified) EventBase.
     filtered_events = map(allowed, events)
 
     # Turn it into a list and remove None entries before returning.
@@ -140,12 +199,12 @@ async def filter_events_for_client(
 
 async def filter_event_for_clients_with_state(
     store: DataStore,
-    user_ids: Collection[str],
+    user_ids: StrCollection,
     event: EventBase,
     context: EventContext,
     is_peeking: bool = False,
     filter_send_to_client: bool = True,
-) -> Collection[str]:
+) -> StrCollection:
     """
     Checks to see if an event is visible to the users in the list at the time of
     the event.
@@ -309,7 +368,7 @@ def _check_client_allowed_to_see_event(
             _check_filter_send_to_client(event, clock, retention_policy, sender_ignored)
             == _CheckFilter.DENIED
         ):
-            logger.debug(
+            filtered_event_logger.debug(
                 "_check_client_allowed_to_see_event(event=%s): Filtered out event because `_check_filter_send_to_client` returned `_CheckFilter.DENIED`",
                 event.event_id,
             )
@@ -331,7 +390,7 @@ def _check_client_allowed_to_see_event(
             )
             return event
 
-        logger.debug(
+        filtered_event_logger.debug(
             "_check_client_allowed_to_see_event(event=%s): Filtered out event because it's an outlier",
             event.event_id,
         )
@@ -357,7 +416,7 @@ def _check_client_allowed_to_see_event(
 
     membership_result = _check_membership(user_id, event, visibility, state, is_peeking)
     if not membership_result.allowed:
-        logger.debug(
+        filtered_event_logger.debug(
             "_check_client_allowed_to_see_event(event=%s): Filtered out event because the user can't see the event because of their membership, membership_result.allowed=%s membership_result.joined=%s",
             event.event_id,
             membership_result.allowed,
@@ -368,7 +427,7 @@ def _check_client_allowed_to_see_event(
     # If the sender has been erased and the user was not joined at the time, we
     # must only return the redacted form.
     if sender_erased and not membership_result.joined:
-        logger.debug(
+        filtered_event_logger.debug(
             "_check_client_allowed_to_see_event(event=%s): Returning pruned event because `sender_erased` and the user was not joined at the time",
             event.event_id,
         )
@@ -379,7 +438,13 @@ def _check_client_allowed_to_see_event(
 
 @attr.s(frozen=True, slots=True, auto_attribs=True)
 class _CheckMembershipReturn:
-    "Return value of _check_membership"
+    """Return value of `_check_membership`.
+
+    Attributes:
+        allowed: Whether the user should be allowed to see the event.
+        joined: Whether the user was joined to the room at the event.
+    """
+
     allowed: bool
     joined: bool
 
@@ -391,12 +456,7 @@ def _check_membership(
     state: StateMap[EventBase],
     is_peeking: bool,
 ) -> _CheckMembershipReturn:
-    """Check whether the user can see the event due to their membership
-
-    Returns:
-        True if they can, False if they can't, plus the membership of the user
-        at the event.
-    """
+    """Check whether the user can see the event due to their membership"""
     # If the event is the user's own membership event, use the 'most joined'
     # membership
     membership = None
@@ -418,7 +478,7 @@ def _check_membership(
         if membership == "leave" and (
             prev_membership == "join" or prev_membership == "invite"
         ):
-            return _CheckMembershipReturn(True, membership == Membership.JOIN)
+            return _CheckMembershipReturn(True, False)
 
         new_priority = MEMBERSHIP_PRIORITY.index(membership)
         old_priority = MEMBERSHIP_PRIORITY.index(prev_membership)
@@ -565,29 +625,43 @@ async def filter_events_for_server(
     storage: StorageControllers,
     target_server_name: str,
     local_server_name: str,
-    events: List[EventBase],
-    redact: bool = True,
-    check_history_visibility_only: bool = False,
+    events: Sequence[EventBase],
+    *,
+    redact: bool,
+    filter_out_erased_senders: bool,
+    filter_out_remote_partial_state_events: bool,
 ) -> List[EventBase]:
-    """Filter a list of events based on whether given server is allowed to
+    """Filter a list of events based on whether the target server is allowed to
     see them.
+
+    For a fully stated room, the target server is allowed to see an event E if:
+      - the state at E has world readable or shared history vis, OR
+      - the state at E says that the target server is in the room.
+
+    For a partially stated room, the target server is allowed to see E if:
+      - E was created by this homeserver, AND:
+          - the partial state at E has world readable or shared history vis, OR
+          - the partial state at E says that the target server is in the room.
+
+    TODO: state before or state after?
 
     Args:
         storage
-        server_name
+        target_server_name
+        local_server_name
         events
-        redact: Whether to return a redacted version of the event, or
-            to filter them out entirely.
-        check_history_visibility_only: Whether to only check the
-            history visibility, rather than things like if the sender has been
+        redact: Controls what to do with events which have been filtered out.
+            If True, include their redacted forms; if False, omit them entirely.
+        filter_out_erased_senders: If true, also filter out events whose sender has been
             erased. This is used e.g. during pagination to decide whether to
             backfill or not.
-
+        filter_out_remote_partial_state_events: If True, also filter out events in
+            partial state rooms created by other homeservers.
     Returns
         The filtered events.
     """
 
-    def is_sender_erased(event: EventBase, erased_senders: Dict[str, bool]) -> bool:
+    def is_sender_erased(event: EventBase, erased_senders: Mapping[str, bool]) -> bool:
         if erased_senders and erased_senders[event.sender]:
             logger.info("Sender of %s has been erased, redacting", event.event_id)
             return True
@@ -616,7 +690,7 @@ async def filter_events_for_server(
         # server has no users in the room: redact
         return False
 
-    if not check_history_visibility_only:
+    if filter_out_erased_senders:
         erased_senders = await storage.main.are_users_erased(e.sender for e in events)
     else:
         # We don't want to check whether users are erased, which is equivalent
@@ -631,15 +705,15 @@ async def filter_events_for_server(
     # otherwise a room could be fully joined after we retrieve those, which would then bypass
     # this check but would base the filtering on an outdated view of the membership events.
 
-    partial_state_invisible_events = set()
-    if not check_history_visibility_only:
+    partial_state_invisible_event_ids: Set[str] = set()
+    if filter_out_remote_partial_state_events:
         for e in events:
             sender_domain = get_domain_from_id(e.sender)
             if (
                 sender_domain != local_server_name
                 and await storage.main.is_partial_state_room(e.room_id)
             ):
-                partial_state_invisible_events.add(e)
+                partial_state_invisible_event_ids.add(e.event_id)
 
     # Let's check to see if all the events have a history visibility
     # of "shared" or "world_readable". If that's the case then we don't
@@ -658,17 +732,20 @@ async def filter_events_for_server(
         target_server_name,
     )
 
-    to_return = []
-    for e in events:
+    def include_event_in_output(e: EventBase) -> bool:
         erased = is_sender_erased(e, erased_senders)
         visible = check_event_is_visible(
             event_to_history_vis[e.event_id], event_to_memberships.get(e.event_id, {})
         )
 
-        if e in partial_state_invisible_events:
+        if e.event_id in partial_state_invisible_event_ids:
             visible = False
 
-        if visible and not erased:
+        return visible and not erased
+
+    to_return = []
+    for e in events:
+        if include_event_in_output(e):
             to_return.append(e)
         elif redact:
             to_return.append(prune_event(e))
