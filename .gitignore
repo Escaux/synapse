@@ -1,4 +1,5 @@
 # filename patterns
+.pc
 *~
 .*.swp
 .#*
